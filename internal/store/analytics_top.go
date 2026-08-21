@@ -144,9 +144,14 @@ func (s *PostgresStore) topAssetTransfers(ctx context.Context, since time.Time, 
 // topHighestFees ranks individual transactions, which no aggregate can
 // summarise. It reads the raw hypertable through idx_tx_fee_charged, so each
 // chunk in the window is scanned in fee order and merge-appended.
+//
+// fee_charged is selected unconverted and widened in Go on purpose. Casting it
+// in the select list makes ORDER BY bind to the converted output column, which
+// the index cannot satisfy: the plan degrades from a merge append over index
+// scans to a sequential scan and a top-N sort.
 func (s *PostgresStore) topHighestFees(ctx context.Context, since time.Time, limit int) ([]analytics.TopEntry, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT hash, fee_charged::double precision, account, is_soroban
+		SELECT hash, fee_charged, account, is_soroban
 		FROM transactions
 		WHERE created_at >= $1
 		ORDER BY fee_charged DESC, hash
@@ -159,14 +164,16 @@ func (s *PostgresStore) topHighestFees(ctx context.Context, since time.Time, lim
 	entries := make([]analytics.TopEntry, 0, limit)
 	for rows.Next() {
 		var (
-			entry     analytics.TopEntry
-			account   string
-			isSoroban bool
+			entry      analytics.TopEntry
+			feeCharged int64
+			account    string
+			isSoroban  bool
 		)
-		if err := rows.Scan(&entry.ID, &entry.Value, &account, &isSoroban); err != nil {
+		if err := rows.Scan(&entry.ID, &feeCharged, &account, &isSoroban); err != nil {
 			return nil, fmt.Errorf("scan highest fees: %w", err)
 		}
 
+		entry.Value = float64(feeCharged)
 		entry.Label = truncateHash(entry.ID)
 		entry.Metadata = metadata(map[string]any{
 			"account":    account,
