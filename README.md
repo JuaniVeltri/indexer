@@ -36,6 +36,20 @@ make build
 | `API_ADDR`     | `:8080`                                                                               | No       | Listen address for the read API served by `serve`.        |
 | `API_CORS_ORIGINS` | `*`                                                                               | No       | Comma-separated CORS allow-list for the read API. Empty refuses cross-origin requests. |
 
+### Listeners
+
+The two listen addresses serve different processes and should be treated differently:
+
+| Address | Process | Serves | Exposure |
+| ------- | ------- | ------ | -------- |
+| `METRICS_ADDR` | `live` | `/metrics`, `/healthz` | Internal. Ingestion telemetry only. |
+| `API_ADDR` | `serve` | `/api/v1/analytics/*`, **plus** `/metrics` and `/healthz` for that process | Public, if the explorer is public. |
+
+`serve` exposes `/metrics` and `/healthz` for its own process on the same port as the API, so an
+orchestrator can probe it. Those report the API process, not the ingestion pipeline — the analytics
+API is never mounted on `live`. If the API port faces the internet and the process telemetry should
+not, put the API behind a proxy that only forwards `/api/v1/`.
+
 ### Observability
 
 When `METRICS_ADDR` is set, `live` starts an HTTP server alongside ingestion:

@@ -18,6 +18,10 @@ points at. It is deliberately not mounted on the `live` command: sharing that pr
 dashboard queries on the ingestion connection pool, where a burst can exhaust it, stall writes, and
 trip the `/healthz` staleness check into a restart.
 
+The same listener also answers `/metrics` and `/healthz` for the API process itself, so an
+orchestrator can probe it. Those describe the API process, not the ingestion pipeline. If the port
+is public and that telemetry should not be, front it with a proxy that forwards only `/api/v1/`.
+
 `API_CORS_ORIGINS` sets the browser allow-list, defaulting to `*` — appropriate for a read-only
 public surface with no credentials. Set it to a comma-separated list to restrict access, or to an
 empty value to refuse cross-origin requests entirely.
