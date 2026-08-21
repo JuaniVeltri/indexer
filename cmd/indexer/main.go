@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -31,7 +32,7 @@ func main() {
 	fmt.Printf("  Workers:    %d\n", cfg.WorkerCount)
 
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: indexer <live|backfill|s3backfill|serve|migrate>")
+		fmt.Println("Usage: indexer <live|backfill|s3backfill|serve|analytics-backfill|migrate>")
 		os.Exit(1)
 	}
 
@@ -50,10 +51,12 @@ func main() {
 		runS3Backfill(cfg)
 	case "serve":
 		runServe(cfg)
+	case "analytics-backfill":
+		runAnalyticsBackfill(cfg)
 	case "migrate":
 		runMigrate(cfg.DatabaseURL)
 	default:
-		log.Fatalf("Unknown command: %s. Use: live, backfill, s3backfill, serve, migrate", os.Args[1])
+		log.Fatalf("Unknown command: %s. Use: live, backfill, s3backfill, serve, analytics-backfill, migrate", os.Args[1])
 	}
 }
 
@@ -201,6 +204,70 @@ func runS3Backfill(cfg *config.Config) {
 		log.Fatalf("S3 backfill failed: %v", err)
 	}
 	log.Println("S3 backfill complete.")
+}
+
+// runAnalyticsBackfill populates the analytics continuous aggregates from data
+// already in the database. The migration creates them empty so it stays instant
+// on a populated database; this is the one-off that fills them in.
+//
+// Re-running is safe and cheap: TimescaleDB commits each batch separately and
+// skips buckets that are already materialized, so an interrupted run resumes.
+func runAnalyticsBackfill(cfg *config.Config) {
+	from, to := parseAnalyticsWindowFlags()
+
+	ctx, cancel := setupContext()
+	defer cancel()
+
+	db, err := store.NewPostgresStore(cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+	defer db.Close()
+
+	log.Println("Refreshing analytics aggregates...")
+	results, err := db.RefreshAnalyticsAggregates(ctx, from, to)
+
+	// Report whatever completed before reacting to a failure, so a partial run
+	// still tells the operator where it got to.
+	for _, r := range results {
+		if r.Skipped {
+			log.Printf("  %-38s skipped: window holds no complete bucket", r.Aggregate)
+			continue
+		}
+		log.Printf("  %-38s refreshed in %s", r.Aggregate, r.Duration.Round(time.Millisecond))
+	}
+
+	if err != nil && !errors.Is(err, context.Canceled) {
+		log.Fatalf("Analytics backfill failed: %v", err)
+	}
+	log.Println("Analytics backfill complete.")
+}
+
+// parseAnalyticsWindowFlags reads the optional --from/--to RFC 3339 bounds.
+// An omitted bound means "as far as the data goes" in that direction.
+func parseAnalyticsWindowFlags() (from, to time.Time) {
+	parse := func(flag, raw string) time.Time {
+		ts, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			log.Fatalf("Invalid %s value %q: expected RFC 3339, e.g. 2026-01-01T00:00:00Z", flag, raw)
+		}
+		return ts.UTC()
+	}
+
+	for i := 2; i < len(os.Args)-1; i++ {
+		switch os.Args[i] {
+		case "--from":
+			from = parse("--from", os.Args[i+1])
+		case "--to":
+			to = parse("--to", os.Args[i+1])
+		}
+	}
+
+	if !from.IsZero() && !to.IsZero() && !from.Before(to) {
+		log.Fatalf("Invalid window: --from (%s) must be before --to (%s)",
+			from.Format(time.RFC3339), to.Format(time.RFC3339))
+	}
+	return from, to
 }
 
 func parseBackfillFlags() (uint32, uint32) {
