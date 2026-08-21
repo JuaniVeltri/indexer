@@ -111,10 +111,10 @@ The explorer uses exactly that to render its "not available yet" state, so these
 answer `404` for a valid-but-unpopulated metric. Only malformed parameters produce `400`, and only
 a genuine backend failure produces `500`.
 
-**Buckets are epoch-aligned in UTC.** `time_bucket` aligns to the UNIX epoch, so a weekly bucket
-starts on a Thursday rather than a Monday. Alignment is identical across resolutions and across
-metrics, which is what lets a daily series derived from hourly rows agree with one computed
-directly from the raw tables.
+**Bucket boundaries follow `time_bucket`, in UTC.** Buckets of a day or more are measured from
+2000-01-03, not the UNIX epoch, which puts weekly boundaries on a **Monday**. Alignment is identical
+across resolutions and across metrics, which is what lets a daily series derived from hourly rows
+agree with one computed directly from the raw tables.
 
 **The most recent bucket is partial.** The aggregates are created with
 `timescaledb.materialized_only = false`, so a query transparently unions materialized rows with

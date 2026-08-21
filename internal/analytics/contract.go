@@ -83,9 +83,10 @@ const (
 var AllResolutions = []Resolution{ResolutionHourly, ResolutionDaily, ResolutionWeekly}
 
 // bucketIntervals maps each resolution to the PostgreSQL interval literal passed
-// to time_bucket. Buckets are aligned to the UNIX epoch in UTC, which is what
-// makes a weekly series derived from hourly rows line up with one computed
-// directly from the raw table.
+// to time_bucket. Boundaries follow time_bucket's own origin — 2000-01-03 for
+// buckets of a day or more, which puts weekly boundaries on a Monday — so a
+// series derived from hourly rows lines up with one computed directly from the
+// raw table.
 var bucketIntervals = map[Resolution]string{
 	ResolutionHourly: "1 hour",
 	ResolutionDaily:  "1 day",

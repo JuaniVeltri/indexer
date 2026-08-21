@@ -1,0 +1,243 @@
+package store
+
+import (
+	"context"
+	"fmt"
+	"testing"
+	"time"
+)
+
+// Analytics fixtures live in the year 2030 so they cannot collide with real
+// ingested data in a developer's local database, while still exercising the
+// same aggregates CI populates from an empty schema.
+var fixtureBase = time.Date(2030, 3, 14, 0, 0, 0, 0, time.UTC)
+
+// Accounts and contracts used by the fixture. The two contracts deliberately
+// end up with equal event counts in one window so tie ordering can be asserted.
+const (
+	fixtureAccountA  = "GFIXTUREAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	fixtureAccountB  = "GFIXTUREBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+	fixtureAccountC  = "GFIXTURECCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC"
+	fixtureContract1 = "CFIXTURE1AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	fixtureContract2 = "CFIXTURE2BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
+	fixtureAssetCode = "FIXT"
+	fixtureIssuer    = "GFIXTUREISSUERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+)
+
+// fixtureHash pads a label into the 64-character hash the schema requires,
+// keeping fixture rows recognisable when inspecting the database by hand.
+func fixtureHash(label string) string {
+	const width = 64
+	h := "fixture" + label
+	for len(h) < width {
+		h += "0"
+	}
+	return h[:width]
+}
+
+// fixtureExpectations records what the fixture data should aggregate to, so the
+// tests compare against hand-computed numbers rather than a second query that
+// could repeat the same mistake.
+//
+//	hour 0: 3 transactions from accounts A, A, B — fees 100 + 200 classic, 5000 soroban
+//	hour 1: 2 transactions from accounts B, C     — fees 400 + 150 classic, no soroban
+//
+// Distinct accounts are therefore 2 in each hour but only 3 across the day,
+// which is the case a summed rollup would get wrong.
+var fixtureExpectations = struct {
+	TxCountHour0, TxCountHour1           float64
+	FeeClassicHour0, FeeClassicHour1     float64
+	FeeSorobanHour0, FeeSorobanHour1     float64
+	ActiveHour0, ActiveHour1, ActiveDay  float64
+	NewAccountsHour0, NewAccountsHour1   float64
+	VolumeXLMHour0, VolumeXLMHour1       float64
+	SupplyHour0                          float64
+	Contract1Events, Contract2Events     float64
+	HighestFee, SecondHighestFee         float64
+	HighestFeeHash, SecondHighestFeeHash string
+}{
+	TxCountHour0: 3, TxCountHour1: 2,
+	FeeClassicHour0: 300, FeeClassicHour1: 550,
+	FeeSorobanHour0: 5000, FeeSorobanHour1: 0,
+	ActiveHour0: 2, ActiveHour1: 2, ActiveDay: 3,
+	NewAccountsHour0: 2, NewAccountsHour1: 1,
+	// 30,000,000 and 5,000,000 stroops, reported in XLM.
+	VolumeXLMHour0: 3, VolumeXLMHour1: 0.5,
+	// Minted 10 units, burned 3 units, at the classic 7-decimal scale.
+	SupplyHour0: 7,
+	// Both contracts emit 4 events across the fixture window: an exact tie.
+	Contract1Events: 4, Contract2Events: 4,
+	HighestFee: 5000, SecondHighestFee: 400,
+	HighestFeeHash: fixtureHash("tx-h0-soroban"), SecondHighestFeeHash: fixtureHash("tx-h1-b"),
+}
+
+// insertAnalyticsFixture writes a deterministic two-hour slice of network
+// activity and refreshes every analytics aggregate over it. The returned
+// cleanup removes the rows and re-refreshes, so the aggregates end empty again
+// and repeated runs stay independent.
+func insertAnalyticsFixture(t *testing.T, s *PostgresStore) (from, to time.Time, cleanup func()) {
+	t.Helper()
+
+	ctx := context.Background()
+	hour0 := fixtureBase
+	hour1 := fixtureBase.Add(time.Hour)
+	from = fixtureBase.Add(-time.Hour)
+	to = fixtureBase.Add(48 * time.Hour)
+
+	cleanup = func() {
+		deleteAnalyticsFixture(t, s)
+		if _, err := s.RefreshAnalyticsAggregates(ctx, from, to); err != nil {
+			t.Errorf("cleanup refresh: %v", err)
+		}
+	}
+
+	// Start from a clean slate in case a previous run was interrupted.
+	deleteAnalyticsFixture(t, s)
+
+	insertFixtureTransactions(t, s, hour0, hour1)
+	insertFixtureOperations(t, s, hour0, hour1)
+	insertFixtureTokenEvents(t, s, hour0, hour1)
+	insertFixtureContractEvents(t, s, hour0, hour1)
+
+	if _, err := s.RefreshAnalyticsAggregates(ctx, from, to); err != nil {
+		cleanup()
+		t.Fatalf("refresh aggregates: %v", err)
+	}
+
+	return from, to, cleanup
+}
+
+func insertFixtureTransactions(t *testing.T, s *PostgresStore, hour0, hour1 time.Time) {
+	t.Helper()
+
+	rows := []struct {
+		hash      string
+		account   string
+		fee       int64
+		isSoroban bool
+		at        time.Time
+	}{
+		{fixtureHash("tx-h0-a1"), fixtureAccountA, 100, false, hour0.Add(1 * time.Minute)},
+		{fixtureHash("tx-h0-a2"), fixtureAccountA, 200, false, hour0.Add(2 * time.Minute)},
+		{fixtureHash("tx-h0-soroban"), fixtureAccountB, 5000, true, hour0.Add(3 * time.Minute)},
+		{fixtureHash("tx-h1-b"), fixtureAccountB, 400, false, hour1.Add(1 * time.Minute)},
+		{fixtureHash("tx-h1-c"), fixtureAccountC, 150, false, hour1.Add(2 * time.Minute)},
+	}
+
+	for i, r := range rows {
+		mustExec(t, s, `
+			INSERT INTO transactions (hash, ledger_sequence, application_order, account,
+				account_sequence, fee_charged, max_fee, operation_count, memo_type, status,
+				is_soroban, envelope_xdr, result_xdr, created_at)
+			VALUES ($1, $2, $3, $4, 1, $5, $5, 1, 0, 1, $6, 'fixture', 'fixture', $7)`,
+			r.hash, 900000+i, i+1, r.account, r.fee, r.isSoroban, r.at)
+	}
+}
+
+func insertFixtureOperations(t *testing.T, s *PostgresStore, hour0, hour1 time.Time) {
+	t.Helper()
+
+	// Two account creations in the first hour, one in the second, plus a payment
+	// that must not be counted as a new account.
+	ops := []struct {
+		typeName string
+		at       time.Time
+	}{
+		{"create_account", hour0.Add(1 * time.Minute)},
+		{"create_account", hour0.Add(2 * time.Minute)},
+		{"payment", hour0.Add(3 * time.Minute)},
+		{"create_account", hour1.Add(1 * time.Minute)},
+	}
+
+	for i, op := range ops {
+		mustExec(t, s, `
+			INSERT INTO operations (transaction_id, transaction_hash, application_order,
+				type, type_name, details, created_at)
+			VALUES ($1, $2, 1, 0, $3, '{}'::jsonb, $4)`,
+			900000+i, fixtureHash(fmt.Sprintf("op%d", i)), op.typeName, op.at)
+	}
+}
+
+func insertFixtureTokenEvents(t *testing.T, s *PostgresStore, hour0, hour1 time.Time) {
+	t.Helper()
+
+	events := []struct {
+		eventType int16
+		name      string
+		assetType int16
+		amount    string
+		at        time.Time
+	}{
+		// Native transfers: 3 XLM in hour 0, 0.5 XLM in hour 1.
+		{0, "transfer", 0, "10000000", hour0.Add(1 * time.Minute)},
+		{0, "transfer", 0, "20000000", hour0.Add(2 * time.Minute)},
+		{0, "transfer", 0, "5000000", hour1.Add(1 * time.Minute)},
+		// Fee events must never reach the volume metric.
+		{4, "fee", 0, "99000000", hour0.Add(3 * time.Minute)},
+		// Supply: mint 10 units, burn 3 units of a classic asset.
+		{1, "mint", 1, "100000000", hour0.Add(4 * time.Minute)},
+		{2, "burn", 1, "30000000", hour0.Add(5 * time.Minute)},
+	}
+
+	for i, e := range events {
+		var code, issuer any
+		if e.assetType == 0 {
+			code, issuer = "XLM", nil
+		} else {
+			code, issuer = fixtureAssetCode, fixtureIssuer
+		}
+		mustExec(t, s, `
+			INSERT INTO token_events (event_type, event_type_name, asset_type, asset_code,
+				asset_issuer, amount, transaction_hash, ledger_sequence, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+			e.eventType, e.name, e.assetType, code, issuer, e.amount,
+			fixtureHash(fmt.Sprintf("te%d", i)), 900000+i, e.at)
+	}
+}
+
+func insertFixtureContractEvents(t *testing.T, s *PostgresStore, hour0, hour1 time.Time) {
+	t.Helper()
+
+	// Four events each, so the two contracts tie and the ranking must fall back
+	// to its deterministic secondary key.
+	events := []struct {
+		contract string
+		at       time.Time
+	}{
+		{fixtureContract1, hour0.Add(1 * time.Minute)},
+		{fixtureContract1, hour0.Add(2 * time.Minute)},
+		{fixtureContract1, hour0.Add(3 * time.Minute)},
+		{fixtureContract2, hour0.Add(4 * time.Minute)},
+		{fixtureContract1, hour1.Add(1 * time.Minute)},
+		{fixtureContract2, hour1.Add(2 * time.Minute)},
+		{fixtureContract2, hour1.Add(3 * time.Minute)},
+		{fixtureContract2, hour1.Add(4 * time.Minute)},
+	}
+
+	for i, e := range events {
+		mustExec(t, s, `
+			INSERT INTO contract_events (contract_id, transaction_hash, ledger_sequence,
+				type, topics_xdr, value_xdr, created_at)
+			VALUES ($1, $2, $3, 0, 'fixture', 'fixture', $4)`,
+			e.contract, fixtureHash(fmt.Sprintf("ce%d", i)), 900000+i, e.at)
+	}
+}
+
+func deleteAnalyticsFixture(t *testing.T, s *PostgresStore) {
+	t.Helper()
+
+	windowStart := fixtureBase.Add(-time.Hour)
+	windowEnd := fixtureBase.Add(48 * time.Hour)
+	for _, table := range []string{"transactions", "operations", "token_events", "contract_events"} {
+		mustExec(t, s, fmt.Sprintf(
+			"DELETE FROM %s WHERE created_at >= $1 AND created_at < $2", table),
+			windowStart, windowEnd)
+	}
+}
+
+func mustExec(t *testing.T, s *PostgresStore, query string, args ...any) {
+	t.Helper()
+	if _, err := s.db.ExecContext(context.Background(), query, args...); err != nil {
+		t.Fatalf("exec %.60s...: %v", query, err)
+	}
+}
