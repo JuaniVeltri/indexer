@@ -1,4 +1,4 @@
-.PHONY: build test lint fmt run-live run-backfill migrate clean
+.PHONY: build test lint fmt run-live run-backfill run-serve migrate clean
 
 build:
 	go build -o bin/indexer ./cmd/indexer
@@ -17,6 +17,9 @@ run-live: build
 
 run-backfill: build
 	./bin/indexer backfill
+
+run-serve: build
+	./bin/indexer serve
 
 migrate: build
 	./bin/indexer migrate

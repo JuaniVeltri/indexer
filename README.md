@@ -33,6 +33,7 @@ make build
 | `BATCH_SIZE`   | `100`                                                                                 | No       | Ledgers per batch                                         |
 | `WORKER_COUNT` | `8`                                                                                   | No       | Parallel workers for `backfill` and `s3backfill`          |
 | `METRICS_ADDR` | —                                                                                     | No       | Listen address (e.g. `:9090`) for `/metrics` and `/healthz` during `live` ingestion. Disabled when unset. |
+| `API_ADDR`     | `:8080`                                                                               | No       | Listen address for the read API served by `serve`.        |
 
 ### Observability
 
@@ -47,6 +48,7 @@ When `METRICS_ADDR` is set, `live` starts an HTTP server alongside ingestion:
 make build          # Compile to bin/indexer
 make migrate        # Apply pending database migrations
 make run-live       # Live ingestion (requires RPC_ENDPOINT env var)
+make run-serve      # Analytics read API (no ingestion)
 make test           # Run all tests
 make fmt            # Format code
 make lint           # Run go vet
@@ -104,6 +106,31 @@ Key details:
 # Use more workers for faster throughput
 WORKER_COUNT=16 ./bin/indexer s3backfill --start 3 --end 5000000
 ```
+
+## Network analytics
+
+Network-wide time series (transaction volume, fees, account activity, asset supply) and Top-N
+rankings are served over HTTP from TimescaleDB continuous aggregates:
+
+```bash
+API_ADDR=:8080 ./bin/indexer serve
+
+curl 'localhost:8080/api/v1/analytics/timeseries?metric=tx_count&resolution=hourly&from=2026-08-20T19:00:00Z&to=2026-08-20T23:00:00Z'
+curl 'localhost:8080/api/v1/analytics/top?metric=contract_activity&window=24h&limit=10'
+```
+
+`serve` runs the read API without ingesting; the same routes are also mounted on the `live` command's
+metrics server when `METRICS_ADDR` is set.
+
+The aggregates are created empty by the migration, so populate them once from existing history:
+
+```bash
+./bin/indexer analytics-backfill                              # everything already ingested
+./bin/indexer analytics-backfill --from 2026-01-01T00:00:00Z  # from a point in time
+```
+
+Metric definitions, response shapes, and the aggregation layout are documented in
+[`docs/analytics-api.md`](docs/analytics-api.md).
 
 ## Migrations
 
@@ -229,10 +256,11 @@ AWS S3 ─────> source/datalake.go ─────────┘       
 
 | Package              | Purpose                                                                 |
 | -------------------- | ----------------------------------------------------------------------- |
-| `cmd/indexer`        | Entry point with `live`, `backfill`, `migrate` commands                 |
+| `cmd/indexer`        | Entry point with `live`, `backfill`, `serve`, `analytics-backfill`, `migrate` commands |
 | `internal/config`    | Environment variable loading and validation                             |
 | `internal/source`    | Stellar RPC client (`getLedgers`, `getTransactions`, `getLatestLedger`) |
 | `internal/transform` | XDR parsing into database models (ledgers, transactions, operations)    |
 | `internal/store`     | PostgreSQL writer with batch inserts and ingestion cursor               |
 | `internal/pipeline`  | Live ingestion loop and parallel backfill orchestration                 |
 | `internal/publisher` | Redis pub/sub for real-time event streaming                             |
+| `internal/analytics` | Network analytics read API: contract, validation, and HTTP handlers     |
