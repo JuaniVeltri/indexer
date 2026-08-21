@@ -77,7 +77,7 @@ curl 'localhost:8080/api/v1/analytics/top?metric=contract_activity&window=24h&li
 | Metric | Source | Value | Unit |
 | ------ | ------ | ----- | ---- |
 | `tx_count` | `transactions` | `COUNT(*)` | transactions |
-| `tx_volume` | `token_events` (`transfer`, native asset) | `SUM(amount_formatted)` | XLM |
+| `tx_volume` | `token_events` (`transfer`, native asset) | `SUM(amount)`, scaled to whole units | XLM |
 | `fee_classic` | `transactions` where `NOT is_soroban` | `SUM(fee_charged)` | stroops |
 | `fee_soroban` | `transactions` where `is_soroban` | `SUM(fee_charged)` | stroops |
 | `active_accounts` | `transactions` | `COUNT(DISTINCT account)` | accounts |
@@ -86,7 +86,7 @@ curl 'localhost:8080/api/v1/analytics/top?metric=contract_activity&window=24h&li
 
 | Top-N metric | Source | `id` | `value` |
 | ------------ | ------ | ---- | ------- |
-| `contract_activity` | `operations` with a `contract_id` | contract ID | invocations |
+| `contract_activity` | `contract_events` per contract | contract ID | events emitted |
 | `asset_transfers` | `token_events` (`transfer`) | `CODE-ISSUER`, or `native` | transferred volume |
 | `highest_fees` | `transactions` | transaction hash | fee charged, in stroops |
 
@@ -99,6 +99,12 @@ Notes on the definitions:
   component. `transactions.soroban_resources` exists in the schema but the transform layer does not
   populate it yet, so the resource fee cannot be separated from the inclusion fee. Splitting them
   requires extracting `SorobanTransactionData.resourceFee` during transform — tracked separately.
+- **`contract_activity` counts contract events, not invocations.** `operations.contract_id` is never
+  populated: the transform layer records only the host function *type* for `invoke_host_function`,
+  not the contract called. `contract_events` is the only per-contract signal available today.
+- **Amounts come from `amount`, not `amount_formatted`.** The latter is never populated by the
+  transform layer, so stored base units are scaled by the asset's decimals at read time — falling
+  back to the classic Stellar precision of 7.
 - **`asset_supply` sums signed deltas across every asset** when queried through this endpoint.
   Because assets have different units, that total is an activity indicator rather than a monetary
   figure. The underlying aggregate is stored per asset, so a per-asset series can be exposed later
