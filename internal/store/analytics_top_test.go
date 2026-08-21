@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -52,17 +53,65 @@ func TestTopNAssetTransfersScalesAmountsByDecimals(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TopN: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("got %d entries, want 1 (only the native asset is transferred): %+v", len(entries), entries)
+
+	byID := make(map[string]analytics.TopEntry, len(entries))
+	for _, e := range entries {
+		byID[e.ID] = e
 	}
 
-	// 30,000,000 + 5,000,000 stroops reported in whole XLM.
-	const wantXLM = 3.5
-	if entries[0].Value != wantXLM {
-		t.Errorf("native transfer volume = %v, want %v", entries[0].Value, wantXLM)
+	// 30,000,000 + 5,000,000 stroops reported in whole XLM, at the classic
+	// 7-decimal fallback.
+	native, ok := byID["native"]
+	if !ok {
+		t.Fatalf("native asset missing from the ranking: %+v", entries)
 	}
-	if entries[0].ID != "native" {
-		t.Errorf("native asset id = %q, want %q", entries[0].ID, "native")
+	if native.Value != 3.5 {
+		t.Errorf("native transfer volume = %v, want 3.5", native.Value)
+	}
+
+	// The catalogued Soroban token has 2 decimals, so its 12,345 base units must
+	// be scaled by its own precision rather than the fallback. Getting this from
+	// the fallback instead would report 0.0012345.
+	token, ok := byID[fixtureTokenContract]
+	if !ok {
+		t.Fatalf("catalogued Soroban token missing from the ranking: %+v", entries)
+	}
+	if token.Value != fixtureExpectations.SorobanTokenUnits {
+		t.Errorf("token volume = %v, want %v — the decimals join is not being applied",
+			token.Value, fixtureExpectations.SorobanTokenUnits)
+	}
+	if got := token.Metadata["decimals"]; got != fixtureTokenDecimals {
+		t.Errorf("metadata decimals = %v, want %d", got, fixtureTokenDecimals)
+	}
+	if token.Label != fixtureTokenSymbol {
+		t.Errorf("token label = %q, want the catalogued symbol %q", token.Label, fixtureTokenSymbol)
+	}
+}
+
+// TestTopNSurvivesHostileTokenDecimals covers a token whose decimals() reports
+// an absurd value. token_decimals is stored unvalidated, and used raw as an
+// exponent it fails the whole query rather than one row: a large value
+// overflows the numeric format and a very negative one underflows the divisor
+// to zero, turning two public endpoints into a 500 for every caller.
+func TestTopNSurvivesHostileTokenDecimals(t *testing.T) {
+	store := getTestDB(t)
+	defer store.Close()
+
+	_, from, cleanup := insertAnalyticsFixture(t, store)
+	defer cleanup()
+
+	for _, decimals := range []int{200000, -2147483648, -1} {
+		t.Run(fmt.Sprintf("decimals=%d", decimals), func(t *testing.T) {
+			mustExec(t, store, "UPDATE contracts SET token_decimals = $1 WHERE contract_id = $2",
+				decimals, fixtureTokenContract)
+
+			if _, err := store.TopN(context.Background(), analytics.TopAssetTransfers, fixtureSince, fixtureUntil, 10); err != nil {
+				t.Errorf("TopN must not fail on an absurd token precision: %v", err)
+			}
+			if _, err := store.TimeSeries(context.Background(), analytics.MetricAssetSupply, analytics.ResolutionHourly, fixtureSince, from); err != nil {
+				t.Errorf("TimeSeries must not fail on an absurd token precision: %v", err)
+			}
+		})
 	}
 }
 

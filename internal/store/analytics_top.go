@@ -16,6 +16,12 @@ const hashLabelPrefix = 8
 // TopN returns the highest-ranked entities for metric over [since, until),
 // most valuable first. Every ranking breaks ties on a deterministic secondary
 // key so repeating a query returns the same order.
+//
+// The lower bound is widened to the enclosing hour. Two of the three rankings
+// read hourly aggregates, where the bucket holding an arbitrary instant would
+// otherwise be excluded outright — shrinking a 24-hour window to as little as
+// 23h01m depending on the minute the request arrives. highest_fees reads raw
+// rows and is widened the same way so all three cover an identical range.
 func (s *PostgresStore) TopN(
 	ctx context.Context,
 	metric analytics.TopMetric,
@@ -46,7 +52,7 @@ func (s *PostgresStore) topContractActivity(ctx context.Context, since, until ti
 		       c.token_symbol
 		FROM analytics_contract_activity_hourly a
 		LEFT JOIN contracts c ON c.contract_id = a.contract_id
-		WHERE a.bucket >= $1 AND a.bucket < $2
+		WHERE a.bucket >= time_bucket(INTERVAL '1 hour', $1::timestamptz) AND a.bucket < $2
 		GROUP BY a.contract_id, c.label, c.token_name, c.contract_type, c.token_symbol
 		ORDER BY value DESC, a.contract_id
 		LIMIT $3`, since, until, limit)
@@ -100,12 +106,12 @@ func (s *PostgresStore) topAssetTransfers(ctx context.Context, since, until time
 				) AS id,
 				COALESCE(NULLIF(t.asset_code, ''), c.token_symbol, t.asset_contract_id, 'unknown') AS label,
 				t.asset_issuer AS issuer,
-				COALESCE(c.token_decimals, 7) AS decimals,
-				t.amount_transferred / (10::numeric ^ COALESCE(c.token_decimals, 7)) AS units,
+				`+safeDecimals+` AS decimals,
+				t.amount_transferred / (10::numeric ^ `+safeDecimals+`) AS units,
 				t.transfer_count
 			FROM analytics_asset_transfers_hourly t
 			LEFT JOIN contracts c ON c.contract_id = t.asset_contract_id
-			WHERE t.bucket >= $1 AND t.bucket < $2
+			WHERE t.bucket >= time_bucket(INTERVAL '1 hour', $1::timestamptz) AND t.bucket < $2
 		)
 		SELECT id,
 		       MIN(label) AS label,
@@ -160,7 +166,7 @@ func (s *PostgresStore) topHighestFees(ctx context.Context, since, until time.Ti
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT hash, fee_charged, account, is_soroban
 		FROM transactions
-		WHERE created_at >= $1 AND created_at < $2
+		WHERE created_at >= time_bucket(INTERVAL '1 hour', $1::timestamptz) AND created_at < $2
 		ORDER BY fee_charged DESC, hash
 		LIMIT $3`, since, until, limit)
 	if err != nil {

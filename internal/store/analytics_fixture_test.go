@@ -27,6 +27,13 @@ const (
 	fixtureContract2 = "CFIXTURE2BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
 	fixtureAssetCode = "FIXT"
 	fixtureIssuer    = "GFIXTUREISSUERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+
+	// A catalogued Soroban token with a non-default precision, so the decimals
+	// join and the scaling it feeds are actually exercised rather than always
+	// falling back to the classic 7.
+	fixtureTokenContract = "CFIXTURETOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	fixtureTokenSymbol   = "FIXT2"
+	fixtureTokenDecimals = 2
 )
 
 // fixtureHash pads a label into the 64-character hash the schema requires,
@@ -57,6 +64,7 @@ var fixtureExpectations = struct {
 	NewAccountsHour0, NewAccountsHour1   float64
 	VolumeXLMHour0, VolumeXLMHour1       float64
 	SupplyHour0                          float64
+	SorobanTokenUnits                    float64
 	Contract1Events, Contract2Events     float64
 	HighestFee, SecondHighestFee         float64
 	HighestFeeHash, SecondHighestFeeHash string
@@ -70,6 +78,8 @@ var fixtureExpectations = struct {
 	VolumeXLMHour0: 3, VolumeXLMHour1: 0.5,
 	// Minted 10 units, burned 3 units, at the classic 7-decimal scale.
 	SupplyHour0: 7,
+	// 12,345 base units of a 2-decimal token.
+	SorobanTokenUnits: 123.45,
 	// Both contracts emit 4 events across the fixture window: an exact tie.
 	Contract1Events: 4, Contract2Events: 4,
 	HighestFee: 5000, SecondHighestFee: 400,
@@ -99,6 +109,7 @@ func insertAnalyticsFixture(t *testing.T, s *PostgresStore) (from, to time.Time,
 	// Start from a clean slate in case a previous run was interrupted.
 	deleteAnalyticsFixture(t, s)
 
+	insertFixtureContracts(t, s)
 	insertFixtureTransactions(t, s, hour0, hour1)
 	insertFixtureOperations(t, s, hour0, hour1)
 	insertFixtureTokenEvents(t, s, hour0, hour1)
@@ -110,6 +121,19 @@ func insertAnalyticsFixture(t *testing.T, s *PostgresStore) (from, to time.Time,
 	}
 
 	return from, to, cleanup
+}
+
+// insertFixtureContracts catalogues the Soroban token so the decimals join in
+// the ranking and supply queries resolves to something other than the fallback.
+func insertFixtureContracts(t *testing.T, s *PostgresStore) {
+	t.Helper()
+
+	mustExec(t, s, `
+		INSERT INTO contracts (contract_id, created_ledger, created_at, last_modified_ledger,
+			contract_type, is_sep41_token, token_symbol, token_decimals)
+		VALUES ($1, 900000, $2, 900000, 0, TRUE, $3, $4)
+		ON CONFLICT (contract_id) DO UPDATE SET token_decimals = EXCLUDED.token_decimals`,
+		fixtureTokenContract, fixtureBase, fixtureTokenSymbol, fixtureTokenDecimals)
 }
 
 func insertFixtureTransactions(t *testing.T, s *PostgresStore, hour0, hour1 time.Time) {
@@ -182,20 +206,25 @@ func insertFixtureTokenEvents(t *testing.T, s *PostgresStore, hour0, hour1 time.
 		// Supply: mint 10 units, burn 3 units of a classic asset.
 		{1, "mint", 1, "100000000", hour0.Add(4 * time.Minute)},
 		{2, "burn", 1, "30000000", hour0.Add(5 * time.Minute)},
+		// A catalogued 2-decimal Soroban token: 12,345 base units = 123.45.
+		{0, "transfer", 2, "12345", hour0.Add(6 * time.Minute)},
 	}
 
 	for i, e := range events {
-		var code, issuer any
-		if e.assetType == 0 {
-			code, issuer = "XLM", nil
-		} else {
-			code, issuer = fixtureAssetCode, fixtureIssuer
+		var code, issuer, contract any
+		switch e.assetType {
+		case 0:
+			code, issuer, contract = "XLM", nil, nil
+		case 2:
+			code, issuer, contract = nil, nil, fixtureTokenContract
+		default:
+			code, issuer, contract = fixtureAssetCode, fixtureIssuer, nil
 		}
 		mustExec(t, s, `
 			INSERT INTO token_events (event_type, event_type_name, asset_type, asset_code,
-				asset_issuer, amount, transaction_hash, ledger_sequence, created_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			e.eventType, e.name, e.assetType, code, issuer, e.amount,
+				asset_issuer, asset_contract_id, amount, transaction_hash, ledger_sequence, created_at)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			e.eventType, e.name, e.assetType, code, issuer, contract, e.amount,
 			fixtureHash(fmt.Sprintf("te%d", i)), 900000+i, e.at)
 	}
 }
@@ -238,6 +267,7 @@ func deleteAnalyticsFixture(t *testing.T, s *PostgresStore) {
 			"DELETE FROM %s WHERE created_at >= $1 AND created_at < $2", table),
 			windowStart, windowEnd)
 	}
+	mustExec(t, s, "DELETE FROM contracts WHERE contract_id = $1", fixtureTokenContract)
 }
 
 func mustExec(t *testing.T, s *PostgresStore, query string, args ...any) {

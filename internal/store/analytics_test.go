@@ -193,13 +193,123 @@ func TestRefreshSkipsAggregatesWiderThanTheWindow(t *testing.T) {
 	}
 }
 
-// TestRefreshWithUnboundedWindowSucceeds is the default backfill invocation:
-// no bounds at all, letting TimescaleDB refresh the full extent of the data.
-func TestRefreshWithUnboundedWindowSucceeds(t *testing.T) {
+// TestRefreshWithOpenStartSucceeds covers the backfill invocation that leaves
+// the start unbounded, letting TimescaleDB reach back as far as the data goes.
+//
+// The upper bound is deliberately not left open too. An unbounded refresh
+// materializes the in-progress bucket and advances every watermark past now,
+// and watermarks never move back — on a developer's own database that would
+// silently disable real-time aggregation for their real data, the very damage
+// the 2013 fixture dates exist to avoid.
+func TestRefreshWithOpenStartSucceeds(t *testing.T) {
 	store := getTestDB(t)
 	defer store.Close()
 
-	if _, err := store.RefreshAnalyticsAggregates(context.Background(), time.Time{}, time.Time{}); err != nil {
-		t.Fatalf("unbounded refresh: %v", err)
+	until := fixtureBase.Add(48 * time.Hour)
+	if _, err := store.RefreshAnalyticsAggregates(context.Background(), time.Time{}, until); err != nil {
+		t.Fatalf("refresh with an open start: %v", err)
+	}
+}
+
+// TestLeadingBucketIsCompleteAndConsistentAcrossMetrics guards the alignment
+// the API documents. Requesting a daily series from the middle of a day used to
+// slice the leading bucket: hourly-backed metrics dropped the earlier hours and
+// reported the remainder stamped as a whole day, while active_accounts — already
+// bucketed daily — dropped the bucket entirely, so the same request returned
+// series of different lengths starting at different timestamps.
+func TestLeadingBucketIsCompleteAndConsistentAcrossMetrics(t *testing.T) {
+	store := getTestDB(t)
+	defer store.Close()
+
+	_, to, cleanup := insertAnalyticsFixture(t, store)
+	defer cleanup()
+
+	// Start the request midway through the fixture's second hour, well after
+	// the day began.
+	midDay := fixtureBase.Add(90 * time.Minute)
+
+	txSeries, err := store.TimeSeries(context.Background(), analytics.MetricTxCount, analytics.ResolutionDaily, midDay, to)
+	if err != nil {
+		t.Fatalf("TimeSeries tx_count: %v", err)
+	}
+	activeSeries, err := store.TimeSeries(context.Background(), analytics.MetricActiveAccounts, analytics.ResolutionDaily, midDay, to)
+	if err != nil {
+		t.Fatalf("TimeSeries active_accounts: %v", err)
+	}
+
+	wantTx := fixtureExpectations.TxCountHour0 + fixtureExpectations.TxCountHour1
+	if got := pointsByBucket(txSeries)[fixtureBase]; got != wantTx {
+		t.Errorf("daily tx_count = %v, want the whole day %v — the leading bucket was sliced",
+			got, wantTx)
+	}
+	if got := pointsByBucket(activeSeries)[fixtureBase]; got != fixtureExpectations.ActiveDay {
+		t.Errorf("daily active_accounts = %v, want %v", got, fixtureExpectations.ActiveDay)
+	}
+
+	if len(txSeries) != len(activeSeries) {
+		t.Errorf("same request returned %d tx_count points but %d active_accounts points",
+			len(txSeries), len(activeSeries))
+	}
+	if len(txSeries) > 0 && len(activeSeries) > 0 && !txSeries[0].Timestamp.Equal(activeSeries[0].Timestamp) {
+		t.Errorf("series start at different buckets: %s vs %s",
+			txSeries[0].Timestamp, activeSeries[0].Timestamp)
+	}
+}
+
+// TestWeeklyResolutionReturnsRealValues exercises the weekly path with data
+// spanning more than one week. The main fixture covers two days, so its weekly
+// aggregate is always skipped — leaving weekly bucketing unverified without
+// this case.
+func TestWeeklyResolutionReturnsRealValues(t *testing.T) {
+	store := getTestDB(t)
+	defer store.Close()
+
+	_, _, cleanup := insertAnalyticsFixture(t, store)
+	defer cleanup()
+
+	// One extra transaction from a new account, eight days later: a different
+	// week, and a distinct account the first week never saw.
+	weekLater := fixtureBase.Add(8 * 24 * time.Hour)
+	mustExec(t, store, `
+		INSERT INTO transactions (hash, ledger_sequence, application_order, account,
+			account_sequence, fee_charged, max_fee, operation_count, memo_type, status,
+			is_soroban, envelope_xdr, result_xdr, created_at)
+		VALUES ($1, 900900, 1, $2, 1, 900, 900, 1, 0, 1, false, 'fixture', 'fixture', $3)`,
+		fixtureHash("tx-week2"), "GFIXTUREWEEK2", weekLater)
+
+	from := fixtureBase.Add(-time.Hour)
+	to := fixtureBase.Add(21 * 24 * time.Hour)
+	if _, err := store.RefreshAnalyticsAggregates(context.Background(), from, to); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+	defer func() {
+		mustExec(t, store, "DELETE FROM transactions WHERE hash = $1", fixtureHash("tx-week2"))
+		if _, err := store.RefreshAnalyticsAggregates(context.Background(), from, to); err != nil {
+			t.Errorf("cleanup refresh: %v", err)
+		}
+	}()
+
+	for _, metric := range []analytics.Metric{analytics.MetricTxCount, analytics.MetricActiveAccounts} {
+		points, err := store.TimeSeries(context.Background(), metric, analytics.ResolutionWeekly, from, to)
+		if err != nil {
+			t.Fatalf("TimeSeries(%s, weekly): %v", metric, err)
+		}
+		if len(points) != 2 {
+			t.Errorf("%s weekly returned %d buckets, want 2 distinct weeks: %+v", metric, len(points), points)
+			continue
+		}
+		if points[1].Value != 1 {
+			t.Errorf("%s second week = %v, want 1", metric, points[1].Value)
+		}
+	}
+
+	// The first week holds five fixture transactions from three accounts, which
+	// is the distinct count a summed rollup would get wrong.
+	weekly, err := store.TimeSeries(context.Background(), analytics.MetricActiveAccounts, analytics.ResolutionWeekly, from, to)
+	if err != nil {
+		t.Fatalf("TimeSeries: %v", err)
+	}
+	if weekly[0].Value != fixtureExpectations.ActiveDay {
+		t.Errorf("first week active_accounts = %v, want %v", weekly[0].Value, fixtureExpectations.ActiveDay)
 	}
 }

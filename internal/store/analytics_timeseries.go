@@ -52,13 +52,23 @@ var hourlySources = map[analytics.Metric]timeSeriesSource{
 	analytics.MetricAssetSupply: {
 		relation: `(
 			SELECT s.bucket,
-			       s.net_supply_delta / (10::numeric ^ COALESCE(c.token_decimals, 7)) AS units
+			       s.net_supply_delta / (10::numeric ^ ` + safeDecimals + `) AS units
 			FROM analytics_asset_supply_hourly s
 			LEFT JOIN contracts c ON c.contract_id = s.asset_contract_id
 		) AS asset_supply`,
 		value: "SUM(units)",
 	},
 }
+
+// safeDecimals is the scaling exponent for an asset's base units.
+//
+// contracts.token_decimals is read from an arbitrary contract's decimals()
+// entry point and stored unvalidated, so it can be absurd or negative. Used
+// raw as an exponent it takes down the whole query rather than one row:
+// a large value overflows the numeric format, and a sufficiently negative one
+// underflows the divisor to zero. Clamping to the representable range keeps a
+// hostile or buggy token from turning a public endpoint into a 500.
+const safeDecimals = `GREATEST(0, LEAST(38, COALESCE(c.token_decimals, 7)))`
 
 // activeAccountViews maps each resolution to its dedicated distinct-count
 // aggregate.
@@ -101,13 +111,21 @@ func (s *PostgresStore) TimeSeries(
 		return nil, err
 	}
 
+	// The lower bound is snapped down to a bucket boundary before filtering.
+	// Filtering on the caller's raw timestamp would slice the leading bucket:
+	// an hourly-backed metric would drop the hours before it and report the
+	// remainder as a whole day, while active_accounts — already bucketed at the
+	// requested resolution — would drop that bucket entirely. Snapping keeps
+	// every returned bucket complete and makes both families agree.
+	//
 	// The relation and value expression come from the tables above, never from
 	// request input; the caller-supplied values are all bound parameters.
 	query := fmt.Sprintf(`
 		SELECT time_bucket($1::interval, bucket) AS ts,
 		       (%s)::double precision AS value
 		FROM %s
-		WHERE bucket >= $2 AND bucket < $3
+		WHERE bucket >= time_bucket($1::interval, $2::timestamptz)
+		  AND bucket < $3
 		GROUP BY ts
 		ORDER BY ts`, source.value, source.relation)
 
