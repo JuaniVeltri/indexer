@@ -122,6 +122,9 @@ live raw data past the refresh watermark. Data stays fresh, and the trailing buc
 elapsed part of its interval. Clients rendering a "current hour" point should treat it as
 in-progress.
 
+**Top-N windows are closed at both ends.** A ranking covers `[now - window, now)`, so a row
+timestamped ahead of the server clock cannot appear in a "last 24 hours" list.
+
 **Ranking ties are stable.** Every Top-N query orders by value descending and then by a
 deterministic secondary key — contract ID, asset key, or transaction hash — so repeating the same
 query over the same window always returns the same list in the same order.

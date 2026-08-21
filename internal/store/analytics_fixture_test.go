@@ -7,10 +7,15 @@ import (
 	"time"
 )
 
-// Analytics fixtures live in the year 2030 so they cannot collide with real
-// ingested data in a developer's local database, while still exercising the
-// same aggregates CI populates from an empty schema.
-var fixtureBase = time.Date(2030, 3, 14, 0, 0, 0, 0, time.UTC)
+// Analytics fixtures live in 2013, before the Stellar network existed, so they
+// cannot collide with real ingested data in a developer's local database.
+//
+// The past rather than the future matters: refreshing a continuous aggregate
+// advances its watermark to the end of the refreshed region, and the watermark
+// never moves back. Future-dated fixtures would leave a developer's aggregates
+// watermarked years ahead, silently disabling real-time aggregation for all of
+// their real data.
+var fixtureBase = time.Date(2013, 3, 14, 0, 0, 0, 0, time.UTC)
 
 // Accounts and contracts used by the fixture. The two contracts deliberately
 // end up with equal event counts in one window so tie ordering can be asserted.

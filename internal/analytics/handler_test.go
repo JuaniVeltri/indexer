@@ -23,6 +23,7 @@ type fakeReader struct {
 	gotTo         time.Time
 	gotTopMetric  TopMetric
 	gotSince      time.Time
+	gotUntil      time.Time
 	gotLimit      int
 }
 
@@ -31,8 +32,8 @@ func (f *fakeReader) TimeSeries(_ context.Context, metric Metric, resolution Res
 	return f.points, f.err
 }
 
-func (f *fakeReader) TopN(_ context.Context, metric TopMetric, since time.Time, limit int) ([]TopEntry, error) {
-	f.gotTopMetric, f.gotSince, f.gotLimit = metric, since, limit
+func (f *fakeReader) TopN(_ context.Context, metric TopMetric, since, until time.Time, limit int) ([]TopEntry, error) {
+	f.gotTopMetric, f.gotSince, f.gotUntil, f.gotLimit = metric, since, until, limit
 	return f.entries, f.err
 }
 
@@ -149,6 +150,11 @@ func TestTopEndpointDerivesTheWindowFromTheClock(t *testing.T) {
 	wantSince := frozenNow.Add(-7 * 24 * time.Hour)
 	if !reader.gotSince.Equal(wantSince) {
 		t.Errorf("reader saw since = %s, want %s", reader.gotSince, wantSince)
+	}
+	// The window closes at the clock, so a row dated ahead of the server cannot
+	// appear in a rolling ranking.
+	if !reader.gotUntil.Equal(frozenNow) {
+		t.Errorf("reader saw until = %s, want %s", reader.gotUntil, frozenNow)
 	}
 	if reader.gotLimit != defaultTopLimit {
 		t.Errorf("reader saw limit = %d, want the default %d", reader.gotLimit, defaultTopLimit)

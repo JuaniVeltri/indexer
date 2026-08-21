@@ -8,10 +8,13 @@ import (
 	"github.com/miguelnietoa/stellar-explorer/indexer/internal/analytics"
 )
 
-// fixtureSince is a window start just before the fixture data. Because the
-// fixture lives in 2030, this excludes any real ingested data a developer may
-// have in their local database.
-var fixtureSince = fixtureBase.Add(-time.Hour)
+// The Top-N window is closed at both ends, which keeps these assertions
+// isolated from any real data a developer has ingested outside the fixture's
+// 2013 window.
+var (
+	fixtureSince = fixtureBase.Add(-time.Hour)
+	fixtureUntil = fixtureBase.Add(48 * time.Hour)
+)
 
 func TestTopNContractActivityRanksByEventCount(t *testing.T) {
 	store := getTestDB(t)
@@ -20,7 +23,7 @@ func TestTopNContractActivityRanksByEventCount(t *testing.T) {
 	_, _, cleanup := insertAnalyticsFixture(t, store)
 	defer cleanup()
 
-	entries, err := store.TopN(context.Background(), analytics.TopContractActivity, fixtureSince, 10)
+	entries, err := store.TopN(context.Background(), analytics.TopContractActivity, fixtureSince, fixtureUntil, 10)
 	if err != nil {
 		t.Fatalf("TopN: %v", err)
 	}
@@ -45,7 +48,7 @@ func TestTopNAssetTransfersScalesAmountsByDecimals(t *testing.T) {
 	_, _, cleanup := insertAnalyticsFixture(t, store)
 	defer cleanup()
 
-	entries, err := store.TopN(context.Background(), analytics.TopAssetTransfers, fixtureSince, 10)
+	entries, err := store.TopN(context.Background(), analytics.TopAssetTransfers, fixtureSince, fixtureUntil, 10)
 	if err != nil {
 		t.Fatalf("TopN: %v", err)
 	}
@@ -70,7 +73,7 @@ func TestTopNHighestFeesRanksIndividualTransactions(t *testing.T) {
 	_, _, cleanup := insertAnalyticsFixture(t, store)
 	defer cleanup()
 
-	entries, err := store.TopN(context.Background(), analytics.TopHighestFees, fixtureSince, 2)
+	entries, err := store.TopN(context.Background(), analytics.TopHighestFees, fixtureSince, fixtureUntil, 2)
 	if err != nil {
 		t.Fatalf("TopN: %v", err)
 	}
@@ -103,7 +106,7 @@ func TestTopNTieOrderingIsStable(t *testing.T) {
 	_, _, cleanup := insertAnalyticsFixture(t, store)
 	defer cleanup()
 
-	first, err := store.TopN(context.Background(), analytics.TopContractActivity, fixtureSince, 10)
+	first, err := store.TopN(context.Background(), analytics.TopContractActivity, fixtureSince, fixtureUntil, 10)
 	if err != nil {
 		t.Fatalf("TopN: %v", err)
 	}
@@ -112,7 +115,7 @@ func TestTopNTieOrderingIsStable(t *testing.T) {
 	}
 
 	for range 5 {
-		again, err := store.TopN(context.Background(), analytics.TopContractActivity, fixtureSince, 10)
+		again, err := store.TopN(context.Background(), analytics.TopContractActivity, fixtureSince, fixtureUntil, 10)
 		if err != nil {
 			t.Fatalf("TopN: %v", err)
 		}
@@ -137,7 +140,7 @@ func TestTopNReturnsEmptyForAQuietWindow(t *testing.T) {
 	quiet := time.Date(2031, 6, 1, 0, 0, 0, 0, time.UTC)
 
 	for _, metric := range analytics.AllTopMetrics {
-		entries, err := store.TopN(context.Background(), metric, quiet, 10)
+		entries, err := store.TopN(context.Background(), metric, quiet, quiet.Add(24*time.Hour), 10)
 		if err != nil {
 			t.Errorf("TopN(%s): %v", metric, err)
 			continue
@@ -155,7 +158,7 @@ func TestTopNRespectsTheLimit(t *testing.T) {
 	_, _, cleanup := insertAnalyticsFixture(t, store)
 	defer cleanup()
 
-	entries, err := store.TopN(context.Background(), analytics.TopHighestFees, fixtureSince, 3)
+	entries, err := store.TopN(context.Background(), analytics.TopHighestFees, fixtureSince, fixtureUntil, 3)
 	if err != nil {
 		t.Fatalf("TopN: %v", err)
 	}

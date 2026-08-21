@@ -20,7 +20,7 @@ const (
 // the same seam /healthz uses for its database ping.
 type Reader interface {
 	TimeSeries(ctx context.Context, metric Metric, resolution Resolution, from, to time.Time) ([]TimeSeriesPoint, error)
-	TopN(ctx context.Context, metric TopMetric, since time.Time, limit int) ([]TopEntry, error)
+	TopN(ctx context.Context, metric TopMetric, since, until time.Time, limit int) ([]TopEntry, error)
 }
 
 // Handler serves the analytics endpoints.
@@ -76,9 +76,12 @@ func (h *Handler) handleTop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	since := h.now().UTC().Add(-req.Window.Duration())
+	// The window is closed at both ends so a row timestamped ahead of the
+	// server clock cannot leak into a "last 24 hours" ranking.
+	until := h.now().UTC()
+	since := until.Add(-req.Window.Duration())
 
-	entries, err := h.reader.TopN(r.Context(), req.Metric, since, req.Limit)
+	entries, err := h.reader.TopN(r.Context(), req.Metric, since, until, req.Limit)
 	if err != nil {
 		writeError(w, err)
 		return

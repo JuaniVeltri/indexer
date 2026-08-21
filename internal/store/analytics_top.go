@@ -13,22 +13,22 @@ import (
 // hash survive truncation into a display label.
 const hashLabelPrefix = 8
 
-// TopN returns the highest-ranked entities for metric over the window starting
-// at since, most valuable first. Every ranking breaks ties on a deterministic
-// secondary key so repeating a query returns the same order.
+// TopN returns the highest-ranked entities for metric over [since, until),
+// most valuable first. Every ranking breaks ties on a deterministic secondary
+// key so repeating a query returns the same order.
 func (s *PostgresStore) TopN(
 	ctx context.Context,
 	metric analytics.TopMetric,
-	since time.Time,
+	since, until time.Time,
 	limit int,
 ) ([]analytics.TopEntry, error) {
 	switch metric {
 	case analytics.TopContractActivity:
-		return s.topContractActivity(ctx, since, limit)
+		return s.topContractActivity(ctx, since, until, limit)
 	case analytics.TopAssetTransfers:
-		return s.topAssetTransfers(ctx, since, limit)
+		return s.topAssetTransfers(ctx, since, until, limit)
 	case analytics.TopHighestFees:
-		return s.topHighestFees(ctx, since, limit)
+		return s.topHighestFees(ctx, since, until, limit)
 	default:
 		return nil, fmt.Errorf("unsupported top-N metric %q", metric)
 	}
@@ -37,7 +37,7 @@ func (s *PostgresStore) TopN(
 // topContractActivity ranks contracts by events emitted. Contract metadata is
 // joined in for a readable label, falling back to the identifier for contracts
 // the indexer has not catalogued.
-func (s *PostgresStore) topContractActivity(ctx context.Context, since time.Time, limit int) ([]analytics.TopEntry, error) {
+func (s *PostgresStore) topContractActivity(ctx context.Context, since, until time.Time, limit int) ([]analytics.TopEntry, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT a.contract_id,
 		       COALESCE(NULLIF(c.label, ''), NULLIF(c.token_name, ''), a.contract_id) AS label,
@@ -46,10 +46,10 @@ func (s *PostgresStore) topContractActivity(ctx context.Context, since time.Time
 		       c.token_symbol
 		FROM analytics_contract_activity_hourly a
 		LEFT JOIN contracts c ON c.contract_id = a.contract_id
-		WHERE a.bucket >= $1
+		WHERE a.bucket >= $1 AND a.bucket < $2
 		GROUP BY a.contract_id, c.label, c.token_name, c.contract_type, c.token_symbol
 		ORDER BY value DESC, a.contract_id
-		LIMIT $2`, since, limit)
+		LIMIT $3`, since, until, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query contract activity: %w", err)
 	}
@@ -82,7 +82,7 @@ func (s *PostgresStore) topContractActivity(ctx context.Context, since time.Time
 // topAssetTransfers ranks assets by transferred volume. Stored amounts are in
 // each asset's base units, so they are scaled by the asset's decimals — falling
 // back to the classic Stellar precision of 7 — before assets are compared.
-func (s *PostgresStore) topAssetTransfers(ctx context.Context, since time.Time, limit int) ([]analytics.TopEntry, error) {
+func (s *PostgresStore) topAssetTransfers(ctx context.Context, since, until time.Time, limit int) ([]analytics.TopEntry, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		WITH scaled AS (
 			SELECT
@@ -98,7 +98,7 @@ func (s *PostgresStore) topAssetTransfers(ctx context.Context, since time.Time, 
 				t.transfer_count
 			FROM analytics_asset_transfers_hourly t
 			LEFT JOIN contracts c ON c.contract_id = t.asset_contract_id
-			WHERE t.bucket >= $1
+			WHERE t.bucket >= $1 AND t.bucket < $2
 		)
 		SELECT id,
 		       MIN(label) AS label,
@@ -109,7 +109,7 @@ func (s *PostgresStore) topAssetTransfers(ctx context.Context, since time.Time, 
 		FROM scaled
 		GROUP BY id
 		ORDER BY value DESC, id
-		LIMIT $2`, since, limit)
+		LIMIT $3`, since, until, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query asset transfers: %w", err)
 	}
@@ -149,13 +149,13 @@ func (s *PostgresStore) topAssetTransfers(ctx context.Context, since time.Time, 
 // in the select list makes ORDER BY bind to the converted output column, which
 // the index cannot satisfy: the plan degrades from a merge append over index
 // scans to a sequential scan and a top-N sort.
-func (s *PostgresStore) topHighestFees(ctx context.Context, since time.Time, limit int) ([]analytics.TopEntry, error) {
+func (s *PostgresStore) topHighestFees(ctx context.Context, since, until time.Time, limit int) ([]analytics.TopEntry, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT hash, fee_charged, account, is_soroban
 		FROM transactions
-		WHERE created_at >= $1
+		WHERE created_at >= $1 AND created_at < $2
 		ORDER BY fee_charged DESC, hash
-		LIMIT $2`, since, limit)
+		LIMIT $3`, since, until, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query highest fees: %w", err)
 	}
