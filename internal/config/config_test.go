@@ -118,3 +118,38 @@ func TestLoad_NegativeBatchSize(t *testing.T) {
 		t.Fatal("expected error for BATCH_SIZE=-5, got nil")
 	}
 }
+
+func TestLoad_APIAddrDefault(t *testing.T) {
+	os.Unsetenv("API_ADDR")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.APIAddr != ":8080" {
+		t.Errorf("expected default APIAddr ':8080', got '%s'", cfg.APIAddr)
+	}
+}
+
+func TestLoad_APIAddrOverride(t *testing.T) {
+	os.Setenv("API_ADDR", "127.0.0.1:9000")
+	defer os.Unsetenv("API_ADDR")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.APIAddr != "127.0.0.1:9000" {
+		t.Errorf("expected APIAddr '127.0.0.1:9000', got '%s'", cfg.APIAddr)
+	}
+}
+
+func TestLoad_InvalidAPIAddr(t *testing.T) {
+	os.Setenv("API_ADDR", "8080")
+	defer os.Unsetenv("API_ADDR")
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("expected error for API_ADDR without a port separator, got nil")
+	}
+}

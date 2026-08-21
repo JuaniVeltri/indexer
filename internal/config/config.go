@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"os"
 	"strconv"
 
@@ -17,6 +18,7 @@ type Config struct {
 	BatchSize    int
 	WorkerCount  int
 	MetricsAddr  string // listen address for /metrics and /healthz; disabled when empty
+	APIAddr      string // listen address for the read API served by the serve command
 }
 
 func Load() (*Config, error) {
@@ -29,6 +31,7 @@ func Load() (*Config, error) {
 		BatchSize:    getEnvInt("BATCH_SIZE", 100),
 		WorkerCount:  getEnvInt("WORKER_COUNT", 8),
 		MetricsAddr:  getEnv("METRICS_ADDR", ""),
+		APIAddr:      getEnv("API_ADDR", ":8080"),
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -52,6 +55,12 @@ func (c *Config) validate() error {
 
 	if c.BatchSize <= 0 {
 		return fmt.Errorf("invalid BATCH_SIZE %d: must be > 0", c.BatchSize)
+	}
+
+	// Caught here rather than at ListenAndServe, so a typo fails at startup
+	// instead of after the process has already reported itself as running.
+	if _, _, err := net.SplitHostPort(c.APIAddr); err != nil {
+		return fmt.Errorf("invalid API_ADDR %q: must be a host:port listen address", c.APIAddr)
 	}
 
 	return nil

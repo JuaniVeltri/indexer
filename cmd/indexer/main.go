@@ -31,7 +31,7 @@ func main() {
 	fmt.Printf("  Workers:    %d\n", cfg.WorkerCount)
 
 	if len(os.Args) < 2 {
-		fmt.Println("Usage: indexer <live|backfill|s3backfill|migrate>")
+		fmt.Println("Usage: indexer <live|backfill|s3backfill|serve|migrate>")
 		os.Exit(1)
 	}
 
@@ -48,10 +48,12 @@ func main() {
 		runBackfill(cfg)
 	case "s3backfill":
 		runS3Backfill(cfg)
+	case "serve":
+		runServe(cfg)
 	case "migrate":
 		runMigrate(cfg.DatabaseURL)
 	default:
-		log.Fatalf("Unknown command: %s. Use: live, backfill, s3backfill, migrate", os.Args[1])
+		log.Fatalf("Unknown command: %s. Use: live, backfill, s3backfill, serve, migrate", os.Args[1])
 	}
 }
 
@@ -89,7 +91,7 @@ func runLive(cfg *config.Config) {
 	defer db.Close()
 
 	if cfg.MetricsAddr != "" {
-		srv := httpserver.New(cfg.MetricsAddr, db.DB())
+		srv := httpserver.New(cfg.MetricsAddr, db.DB(), db)
 		go func() {
 			log.Printf("metrics server listening on %s (/metrics, /healthz)", cfg.MetricsAddr)
 			if err := srv.Start(); err != nil {
@@ -122,6 +124,37 @@ func runLive(cfg *config.Config) {
 	log.Println("Starting live ingestion...")
 	if err := p.Run(ctx); err != nil && err != context.Canceled {
 		log.Fatalf("Live pipeline failed: %v", err)
+	}
+	log.Println("Shutdown complete.")
+}
+
+// runServe starts the analytics read API without ingesting anything. This is
+// the process the explorer points NEXT_PUBLIC_INDEXER_URL at; the same routes
+// are also mounted on the live command's metrics server for local development.
+func runServe(cfg *config.Config) {
+	ctx, cancel := setupContext()
+	defer cancel()
+
+	db, err := store.NewPostgresStore(cfg.DatabaseURL)
+	if err != nil {
+		log.Fatalf("Failed to connect to database: %v", err)
+	}
+	defer db.Close()
+
+	srv := httpserver.New(cfg.APIAddr, db.DB(), db)
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer shutdownCancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Printf("api server shutdown error: %v", err)
+		}
+	}()
+
+	log.Printf("analytics API listening on %s (/api/v1/analytics, /metrics, /healthz)", cfg.APIAddr)
+	if err := srv.Start(); err != nil {
+		log.Fatalf("API server failed: %v", err)
 	}
 	log.Println("Shutdown complete.")
 }

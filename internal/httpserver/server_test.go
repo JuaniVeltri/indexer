@@ -80,7 +80,7 @@ func TestHealthzReturnsServiceUnavailableWhenPipelineStale(t *testing.T) {
 // TestServerExposesMetricsAndHealthz is a hermetic end-to-end check that New
 // wires both routes on a real listener.
 func TestServerExposesMetricsAndHealthz(t *testing.T) {
-	srv := New("127.0.0.1:0", fakePinger{})
+	srv := New("127.0.0.1:0", fakePinger{}, nil)
 
 	go func() {
 		_ = srv.Start()

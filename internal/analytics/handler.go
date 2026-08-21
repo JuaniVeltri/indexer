@@ -1,0 +1,137 @@
+package analytics
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"log"
+	"net/http"
+	"time"
+)
+
+// Route paths, kept together because the explorer's client hard-codes them.
+const (
+	timeSeriesPath = "GET /api/v1/analytics/timeseries"
+	topPath        = "GET /api/v1/analytics/top"
+)
+
+// Reader supplies the aggregated data behind the endpoints. It is declared here
+// rather than in the store so handlers can be exercised without a database,
+// the same seam /healthz uses for its database ping.
+type Reader interface {
+	TimeSeries(ctx context.Context, metric Metric, resolution Resolution, from, to time.Time) ([]TimeSeriesPoint, error)
+	TopN(ctx context.Context, metric TopMetric, since time.Time, limit int) ([]TopEntry, error)
+}
+
+// Handler serves the analytics endpoints.
+type Handler struct {
+	reader Reader
+	// now resolves the end of a Top-N rolling window. Kept as a field so tests
+	// can freeze it.
+	now func() time.Time
+}
+
+// NewHandler builds a Handler reading from the given source.
+func NewHandler(reader Reader) *Handler {
+	return &Handler{reader: reader, now: time.Now}
+}
+
+// Register mounts the analytics routes on mux.
+func (h *Handler) Register(mux *http.ServeMux) {
+	mux.HandleFunc(timeSeriesPath, h.handleTimeSeries)
+	mux.HandleFunc(topPath, h.handleTop)
+}
+
+// errorResponse is the body returned for a rejected or failed request.
+type errorResponse struct {
+	Error string `json:"error"`
+}
+
+func (h *Handler) handleTimeSeries(w http.ResponseWriter, r *http.Request) {
+	req, err := ParseTimeSeriesRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	points, err := h.reader.TimeSeries(r.Context(), req.Metric, req.Resolution, req.From, req.To)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	writeJSON(w, TimeSeriesResponse{
+		Metric:     req.Metric,
+		Resolution: req.Resolution,
+		From:       req.From,
+		To:         req.To,
+		Data:       points,
+	})
+}
+
+func (h *Handler) handleTop(w http.ResponseWriter, r *http.Request) {
+	req, err := ParseTopRequest(r.URL.Query())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	since := h.now().UTC().Add(-req.Window.Duration())
+
+	entries, err := h.reader.TopN(r.Context(), req.Metric, since, req.Limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	writeJSON(w, TopResponse{
+		Metric: req.Metric,
+		Window: req.Window,
+		Data:   entries,
+	})
+}
+
+// writeJSON sends a successful response. Nil slices are normalised to empty
+// ones first: the explorer inspects the length of data to decide whether a
+// metric is available yet, and a null there would fail rather than render the
+// empty state.
+func writeJSON(w http.ResponseWriter, payload any) {
+	switch p := payload.(type) {
+	case TimeSeriesResponse:
+		if p.Data == nil {
+			p.Data = []TimeSeriesPoint{}
+		}
+		payload = p
+	case TopResponse:
+		if p.Data == nil {
+			p.Data = []TopEntry{}
+		}
+		payload = p
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(payload); err != nil {
+		// The status line is already sent, so this can only be logged.
+		log.Printf("analytics: write response: %v", err)
+	}
+}
+
+// writeError maps a failure to a status code. Invalid input is echoed back so
+// the caller can fix it; anything else is reported generically and logged
+// server-side, since these endpoints may be reachable without authentication
+// and the underlying error can name internal infrastructure.
+func writeError(w http.ResponseWriter, err error) {
+	w.Header().Set("Content-Type", "application/json")
+
+	status, message := http.StatusInternalServerError, "internal error"
+	if errors.Is(err, ErrInvalidParam) {
+		status, message = http.StatusBadRequest, err.Error()
+	} else {
+		log.Printf("analytics: request failed: %v", err)
+	}
+
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(errorResponse{Error: message}); err != nil {
+		log.Printf("analytics: write error response: %v", err)
+	}
+}
