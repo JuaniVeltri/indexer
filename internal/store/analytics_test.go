@@ -268,7 +268,9 @@ func TestWeeklyResolutionReturnsRealValues(t *testing.T) {
 	defer cleanup()
 
 	// One extra transaction from a new account, eight days later: a different
-	// week, and a distinct account the first week never saw.
+	// week, and a distinct account the first week never saw. It sits inside the
+	// shared fixture window, so the fixture teardown removes it and re-refreshes
+	// the same range that materialized it.
 	weekLater := fixtureBase.Add(8 * 24 * time.Hour)
 	mustExec(t, store, `
 		INSERT INTO transactions (hash, ledger_sequence, application_order, account,
@@ -277,17 +279,10 @@ func TestWeeklyResolutionReturnsRealValues(t *testing.T) {
 		VALUES ($1, 900900, 1, $2, 1, 900, 900, 1, 0, 1, false, 'fixture', 'fixture', $3)`,
 		fixtureHash("tx-week2"), "GFIXTUREWEEK2", weekLater)
 
-	from := fixtureBase.Add(-time.Hour)
-	to := fixtureBase.Add(21 * 24 * time.Hour)
+	from, to := fixtureWindowStart, fixtureWindowEnd
 	if _, err := store.RefreshAnalyticsAggregates(context.Background(), from, to); err != nil {
 		t.Fatalf("refresh: %v", err)
 	}
-	defer func() {
-		mustExec(t, store, "DELETE FROM transactions WHERE hash = $1", fixtureHash("tx-week2"))
-		if _, err := store.RefreshAnalyticsAggregates(context.Background(), from, to); err != nil {
-			t.Errorf("cleanup refresh: %v", err)
-		}
-	}()
 
 	for _, metric := range []analytics.Metric{analytics.MetricTxCount, analytics.MetricActiveAccounts} {
 		points, err := store.TimeSeries(context.Background(), metric, analytics.ResolutionWeekly, from, to)

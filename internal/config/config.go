@@ -37,7 +37,7 @@ func Load() (*Config, error) {
 		WorkerCount:    getEnvInt("WORKER_COUNT", 8),
 		MetricsAddr:    getEnv("METRICS_ADDR", ""),
 		APIAddr:        getEnv("API_ADDR", ":8080"),
-		APICORSOrigins: splitList(getEnv("API_CORS_ORIGINS", "*")),
+		APICORSOrigins: corsOrigins(),
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -65,8 +65,16 @@ func (c *Config) validate() error {
 
 	// Caught here rather than at ListenAndServe, so a typo fails at startup
 	// instead of after the process has already reported itself as running.
-	if _, _, err := net.SplitHostPort(c.APIAddr); err != nil {
+	// SplitHostPort only checks the colon structure — ":" and ":99999" pass it,
+	// and ":" binds successfully to a random ephemeral port, leaving a healthy
+	// looking process on an address nothing is pointed at — so the port itself
+	// is validated too.
+	_, port, err := net.SplitHostPort(c.APIAddr)
+	if err != nil {
 		return fmt.Errorf("invalid API_ADDR %q: must be a host:port listen address", c.APIAddr)
+	}
+	if err := validatePort(port); err != nil {
+		return fmt.Errorf("invalid API_ADDR %q: %w", c.APIAddr, err)
 	}
 
 	return nil
@@ -93,16 +101,42 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
-// splitList parses a comma-separated environment value, dropping blanks so a
-// trailing comma or stray space cannot introduce an empty origin.
-func splitList(raw string) []string {
-	var items []string
+// corsOrigins parses the CORS allow-list.
+//
+// An unset variable defaults to the wildcard, but a variable set to the empty
+// string means "allow nothing" — the documented way to refuse cross-origin
+// access. Falling back to the default on an empty value, as the other settings
+// do, would silently turn that lockdown into a wildcard.
+func corsOrigins() []string {
+	raw, ok := os.LookupEnv("API_CORS_ORIGINS")
+	if !ok {
+		return []string{"*"}
+	}
+
+	var origins []string
 	for _, item := range strings.Split(raw, ",") {
 		if trimmed := strings.TrimSpace(item); trimmed != "" {
-			items = append(items, trimmed)
+			origins = append(origins, trimmed)
 		}
 	}
-	return items
+	return origins
+}
+
+// validatePort accepts a numeric TCP port, or a named service, but rejects the
+// empty and out-of-range forms SplitHostPort lets through.
+func validatePort(port string) error {
+	if port == "" {
+		return fmt.Errorf("missing port")
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		// A service name such as "http" is resolved by the listener itself.
+		return nil
+	}
+	if n < 1 || n > 65535 {
+		return fmt.Errorf("port %d out of range [1, 65535]", n)
+	}
+	return nil
 }
 
 func getEnvInt(key string, fallback int) int {

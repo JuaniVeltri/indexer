@@ -55,7 +55,8 @@ var AllMetrics = []Metric{
 type TopMetric string
 
 const (
-	// TopContractActivity ranks contracts by invocation count.
+	// TopContractActivity ranks contracts by events emitted, which is the
+	// only per-contract activity signal the indexer records.
 	TopContractActivity TopMetric = "contract_activity"
 	// TopAssetTransfers ranks assets by transferred volume.
 	TopAssetTransfers TopMetric = "asset_transfers"
@@ -147,7 +148,7 @@ type TopEntry struct {
 	ID string `json:"id"`
 	// Label is the human-readable form of ID.
 	Label string `json:"label"`
-	// Value is the ranking value: invocation count, transferred volume, or fee.
+	// Value is the ranking value: events emitted, transferred volume, or fee.
 	Value float64 `json:"value"`
 	// Metadata carries per-metric context and is omitted when empty.
 	Metadata map[string]any `json:"metadata,omitempty"`

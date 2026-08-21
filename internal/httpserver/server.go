@@ -29,8 +29,11 @@ const readHeaderTimeout = 10 * time.Second
 // writeTimeout caps how long a single response may take, so one pathological
 // analytics query cannot hold a connection indefinitely. idleTimeout reclaims
 // keep-alive connections that have gone quiet.
+// writeTimeout must stay below the caller's shutdown grace, so a request
+// started just before SIGTERM cannot outlive the drain and have the database
+// pool closed underneath it.
 const (
-	writeTimeout = 30 * time.Second
+	writeTimeout = 15 * time.Second
 	idleTimeout  = 120 * time.Second
 )
 
@@ -56,19 +59,34 @@ type Server struct {
 	srv *http.Server
 }
 
-// New builds a Server listening on addr. db is used by /healthz to verify the
-// database is reachable and confirm the live pipeline is still advancing.
-//
-// reader supplies the analytics read API. It may be nil, which mounts only the
-// operational endpoints — useful for a process that ingests but should not
-// serve queries. allowedOrigins is the CORS allow-list for those routes.
-func New(addr string, db dbPinger, reader analytics.Reader, allowedOrigins []string) *Server {
-	mux := http.NewServeMux()
-	mux.Handle("/metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}))
-	mux.HandleFunc("/healthz", healthzHandler(db, health.Stale))
+// Options configures what a Server exposes. /healthz is always mounted, since
+// every process wants a probe.
+type Options struct {
+	// DB backs /healthz, verifying the database is reachable and that the live
+	// pipeline is still advancing.
+	DB dbPinger
+	// Analytics supplies the read API. Nil leaves those routes unmounted, which
+	// is what a process that ingests but should not serve queries wants.
+	Analytics analytics.Reader
+	// AllowedOrigins is the CORS allow-list for the analytics routes.
+	AllowedOrigins []string
+	// ExposeMetrics mounts /metrics. It belongs on the ingesting process: the
+	// registry holds ingestion counters, and publishing them from a process
+	// that does not ingest reports every one of them as zero, which drags down
+	// any average or minimum an alert is built on.
+	ExposeMetrics bool
+}
 
-	if reader != nil {
-		analytics.NewHandler(reader, allowedOrigins).Register(mux)
+// New builds a Server listening on addr with the given options.
+func New(addr string, opts Options) *Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/healthz", healthzHandler(opts.DB, health.Stale))
+
+	if opts.ExposeMetrics {
+		mux.Handle("/metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}))
+	}
+	if opts.Analytics != nil {
+		analytics.NewHandler(opts.Analytics, opts.AllowedOrigins).Register(mux)
 	}
 
 	return &Server{

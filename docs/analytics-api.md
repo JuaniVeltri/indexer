@@ -151,8 +151,10 @@ live raw data past the refresh watermark. Data stays fresh, and the trailing buc
 elapsed part of its interval. Clients rendering a "current hour" point should treat it as
 in-progress.
 
-**Top-N windows are closed at both ends.** A ranking covers `[now - window, now)`, so a row
-timestamped ahead of the server clock cannot appear in a "last 24 hours" list.
+**Top-N windows cover whole hours.** Both ends are snapped to the hour, because two of the three
+rankings read hourly aggregates and cannot resolve anything finer. A ranking therefore covers whole
+hours up to the last completed one — the in-progress hour is excluded, and a row timestamped ahead
+of the server clock cannot appear.
 
 **Ranking ties are stable.** Every Top-N query orders by value descending and then by a
 deterministic secondary key — contract ID, asset key, or transaction hash — so repeating the same
@@ -161,6 +163,10 @@ query over the same window always returns the same list in the same order.
 **Ranges are bounded.** A request may span at most 10,000 buckets at the requested resolution;
 beyond that the API answers `400` rather than serialising an unbounded response. Every realistic
 dashboard range is far below the limit — 10,000 buckets is 416 days of hourly data.
+
+**Resetting the database.** Truncating the raw tables does not empty the aggregates: their
+materialized data and watermarks survive. Drop and re-apply migration `000014` — or re-run
+`analytics-backfill` over the affected range — after wiping ingested data.
 
 **Values are JSON numbers** (IEEE-754 doubles), matching the `number` type the explorer client
 expects. Amounts far beyond 2^53 significant units would lose precision, which no current metric
@@ -188,8 +194,18 @@ each computed from the raw table.
 `highest_fees` ranks individual transactions, which no aggregate can summarise, so it reads
 `transactions` directly through an index on `(fee_charged DESC, created_at DESC)`.
 
-Each aggregate carries a refresh policy that runs every 30 minutes over the trailing 30 days,
-excluding the newest bucket so the policy never competes with active writes.
+Each aggregate carries a refresh policy sized to its bucket, always excluding the newest bucket so
+the policy never competes with active writes:
+
+| Aggregate | Runs every | Looks back | Excludes |
+| --------- | ---------- | ---------- | -------- |
+| hourly | 30 minutes | 30 days | the newest hour |
+| `analytics_active_accounts_daily` | 1 hour | 90 days | the newest day |
+| `analytics_active_accounts_weekly` | 6 hours | 1 year | the newest week |
+
+Because the weekly aggregate excludes the week in progress, `active_accounts` at weekly resolution
+computes the current week from the raw table on every request. That is the most expensive query the
+API can serve; prefer daily resolution for recent activity.
 
 ### Backfilling historical data
 

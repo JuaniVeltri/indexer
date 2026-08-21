@@ -17,6 +17,16 @@ import (
 // their real data.
 var fixtureBase = time.Date(2013, 3, 14, 0, 0, 0, 0, time.UTC)
 
+// The window every fixture test owns. It is wide enough to contain a complete
+// weekly bucket, so a test that spreads data across weeks is cleaned up by the
+// same teardown as everything else: deleting rows over a narrower range than
+// the refresh that materialized them would leave a phantom bucket that no
+// later refresh can correct, because the watermark has already moved past it.
+var (
+	fixtureWindowStart = fixtureBase.Add(-time.Hour)
+	fixtureWindowEnd   = fixtureBase.Add(30 * 24 * time.Hour)
+)
+
 // Accounts and contracts used by the fixture. The two contracts deliberately
 // end up with equal event counts in one window so tie ordering can be asserted.
 const (
@@ -34,6 +44,13 @@ const (
 	fixtureTokenContract = "CFIXTURETOKENAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	fixtureTokenSymbol   = "FIXT2"
 	fixtureTokenDecimals = 2
+
+	// Stellar Asset Contracts wrapping the native and classic assets. Both are
+	// catalogued with a precision that is deliberately wrong, to prove classic
+	// amounts ignore it: the protocol fixes those at 7 decimals.
+	fixtureNativeSAC        = "CFIXTURENATIVESACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	fixtureClassicSAC       = "CFIXTURECLASSICSACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+	fixtureWrongSACDecimals = 0
 )
 
 // fixtureHash pads a label into the 64-character hash the schema requires,
@@ -96,8 +113,7 @@ func insertAnalyticsFixture(t *testing.T, s *PostgresStore) (from, to time.Time,
 	ctx := context.Background()
 	hour0 := fixtureBase
 	hour1 := fixtureBase.Add(time.Hour)
-	from = fixtureBase.Add(-time.Hour)
-	to = fixtureBase.Add(48 * time.Hour)
+	from, to = fixtureWindowStart, fixtureWindowEnd
 
 	cleanup = func() {
 		deleteAnalyticsFixture(t, s)
@@ -128,12 +144,24 @@ func insertAnalyticsFixture(t *testing.T, s *PostgresStore) (from, to time.Time,
 func insertFixtureContracts(t *testing.T, s *PostgresStore) {
 	t.Helper()
 
-	mustExec(t, s, `
-		INSERT INTO contracts (contract_id, created_ledger, created_at, last_modified_ledger,
-			contract_type, is_sep41_token, token_symbol, token_decimals)
-		VALUES ($1, 900000, $2, 900000, 0, TRUE, $3, $4)
-		ON CONFLICT (contract_id) DO UPDATE SET token_decimals = EXCLUDED.token_decimals`,
-		fixtureTokenContract, fixtureBase, fixtureTokenSymbol, fixtureTokenDecimals)
+	catalogue := []struct {
+		id       string
+		symbol   string
+		decimals int
+	}{
+		{fixtureTokenContract, fixtureTokenSymbol, fixtureTokenDecimals},
+		{fixtureNativeSAC, "XLM", fixtureWrongSACDecimals},
+		{fixtureClassicSAC, fixtureAssetCode, fixtureWrongSACDecimals},
+	}
+
+	for _, c := range catalogue {
+		mustExec(t, s, `
+			INSERT INTO contracts (contract_id, created_ledger, created_at, last_modified_ledger,
+				contract_type, is_sep41_token, token_symbol, token_decimals)
+			VALUES ($1, 900000, $2, 900000, 0, TRUE, $3, $4)
+			ON CONFLICT (contract_id) DO UPDATE SET token_decimals = EXCLUDED.token_decimals`,
+			c.id, fixtureBase, c.symbol, c.decimals)
+	}
 }
 
 func insertFixtureTransactions(t *testing.T, s *PostgresStore, hour0, hour1 time.Time) {
@@ -167,23 +195,29 @@ func insertFixtureOperations(t *testing.T, s *PostgresStore, hour0, hour1 time.T
 	t.Helper()
 
 	// Two account creations in the first hour, one in the second, plus a payment
-	// that must not be counted as a new account.
+	// that must not be counted as a new account. The numeric type matters: the
+	// aggregate filters on it, not on the name.
+	const (
+		createAccountType = 0
+		paymentType       = 1
+	)
 	ops := []struct {
+		opType   int16
 		typeName string
 		at       time.Time
 	}{
-		{"create_account", hour0.Add(1 * time.Minute)},
-		{"create_account", hour0.Add(2 * time.Minute)},
-		{"payment", hour0.Add(3 * time.Minute)},
-		{"create_account", hour1.Add(1 * time.Minute)},
+		{createAccountType, "create_account", hour0.Add(1 * time.Minute)},
+		{createAccountType, "create_account", hour0.Add(2 * time.Minute)},
+		{paymentType, "payment", hour0.Add(3 * time.Minute)},
+		{createAccountType, "create_account", hour1.Add(1 * time.Minute)},
 	}
 
 	for i, op := range ops {
 		mustExec(t, s, `
 			INSERT INTO operations (transaction_id, transaction_hash, application_order,
 				type, type_name, details, created_at)
-			VALUES ($1, $2, 1, 0, $3, '{}'::jsonb, $4)`,
-			900000+i, fixtureHash(fmt.Sprintf("op%d", i)), op.typeName, op.at)
+			VALUES ($1, $2, 1, $3, $4, '{}'::jsonb, $5)`,
+			900000+i, fixtureHash(fmt.Sprintf("op%d", i)), op.opType, op.typeName, op.at)
 	}
 }
 
@@ -211,14 +245,18 @@ func insertFixtureTokenEvents(t *testing.T, s *PostgresStore, hour0, hour1 time.
 	}
 
 	for i, e := range events {
+		// Every real token event carries the asset's contract id, including
+		// native and classic assets through their Stellar Asset Contract. The
+		// fixture mirrors that so the decimals join is exercised on the same
+		// shape production produces.
 		var code, issuer, contract any
 		switch e.assetType {
 		case 0:
-			code, issuer, contract = "XLM", nil, nil
+			code, issuer, contract = "XLM", nil, fixtureNativeSAC
 		case 2:
 			code, issuer, contract = nil, nil, fixtureTokenContract
 		default:
-			code, issuer, contract = fixtureAssetCode, fixtureIssuer, nil
+			code, issuer, contract = fixtureAssetCode, fixtureIssuer, fixtureClassicSAC
 		}
 		mustExec(t, s, `
 			INSERT INTO token_events (event_type, event_type_name, asset_type, asset_code,
@@ -260,14 +298,12 @@ func insertFixtureContractEvents(t *testing.T, s *PostgresStore, hour0, hour1 ti
 func deleteAnalyticsFixture(t *testing.T, s *PostgresStore) {
 	t.Helper()
 
-	windowStart := fixtureBase.Add(-time.Hour)
-	windowEnd := fixtureBase.Add(48 * time.Hour)
 	for _, table := range []string{"transactions", "operations", "token_events", "contract_events"} {
 		mustExec(t, s, fmt.Sprintf(
 			"DELETE FROM %s WHERE created_at >= $1 AND created_at < $2", table),
-			windowStart, windowEnd)
+			fixtureWindowStart, fixtureWindowEnd)
 	}
-	mustExec(t, s, "DELETE FROM contracts WHERE contract_id = $1", fixtureTokenContract)
+	mustExec(t, s, "DELETE FROM contracts WHERE contract_id LIKE 'CFIXTURE%'")
 }
 
 func mustExec(t *testing.T, s *PostgresStore, query string, args ...any) {

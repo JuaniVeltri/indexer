@@ -52,7 +52,7 @@ var hourlySources = map[analytics.Metric]timeSeriesSource{
 	analytics.MetricAssetSupply: {
 		relation: `(
 			SELECT s.bucket,
-			       s.net_supply_delta / (10::numeric ^ ` + safeDecimals + `) AS units
+			       s.net_supply_delta / (10::numeric ^ ` + decimalsExpr("s") + `) AS units
 			FROM analytics_asset_supply_hourly s
 			LEFT JOIN contracts c ON c.contract_id = s.asset_contract_id
 		) AS asset_supply`,
@@ -60,15 +60,33 @@ var hourlySources = map[analytics.Metric]timeSeriesSource{
 	},
 }
 
-// safeDecimals is the scaling exponent for an asset's base units.
+// classicAssetDecimals is the precision the protocol fixes for native and
+// classic credit assets. It is not read from anywhere, because for those assets
+// it cannot vary.
+const classicAssetDecimals = 7
+
+// decimalsExpr builds the scaling exponent for an asset's base units, where
+// assetAlias is the relation holding asset_type and contracts is joined as c.
 //
-// contracts.token_decimals is read from an arbitrary contract's decimals()
-// entry point and stored unvalidated, so it can be absurd or negative. Used
-// raw as an exponent it takes down the whole query rather than one row:
-// a large value overflows the numeric format, and a sufficiently negative one
-// underflows the divisor to zero. Clamping to the representable range keeps a
-// hostile or buggy token from turning a public endpoint into a 500.
-const safeDecimals = `GREATEST(0, LEAST(38, COALESCE(c.token_decimals, 7)))`
+// Only Soroban tokens carry their own precision. Every classic asset is wrapped
+// by a Stellar Asset Contract, and if the SEP-41 fetcher ever records decimals
+// for one of those contracts, reading it here would silently override the
+// protocol's fixed 7 and misreport those amounts by orders of magnitude.
+//
+// The value is also clamped. contracts.token_decimals comes from an arbitrary
+// contract's decimals() entry point and is stored unvalidated, so it can be
+// absurd or negative — and used raw as an exponent it fails the whole query
+// rather than one row: a large value overflows the numeric format and a very
+// negative one underflows the divisor to zero.
+func decimalsExpr(assetAlias string) string {
+	return fmt.Sprintf(
+		`GREATEST(0, LEAST(38, CASE WHEN %s.asset_type = %d THEN COALESCE(c.token_decimals, %d) ELSE %d END))`,
+		assetAlias, sorobanAssetType, classicAssetDecimals, classicAssetDecimals)
+}
+
+// sorobanAssetType is the token_events.asset_type discriminator for a pure
+// Soroban token, the only kind whose precision is contract-defined.
+const sorobanAssetType = 2
 
 // activeAccountViews maps each resolution to its dedicated distinct-count
 // aggregate.
@@ -97,9 +115,10 @@ func sourceFor(metric analytics.Metric, resolution analytics.Resolution) (timeSe
 }
 
 // TimeSeries returns one point per bucket for metric across [from, to) at the
-// requested resolution. from is widened to the start of the bucket containing
-// it, so the first point can begin slightly earlier than asked for and every
-// returned bucket is complete rather than a sliced one reported as whole.
+// requested resolution. The series is every bucket that overlaps the range,
+// each carrying its complete value, so the first and last points can extend a
+// little beyond what was asked for rather than being sliced and reported as
+// whole.
 //
 // Buckets with no activity are absent rather than zero, and a range with no
 // data at all yields an empty series rather than an error.
@@ -114,12 +133,18 @@ func (s *PostgresStore) TimeSeries(
 		return nil, err
 	}
 
-	// The lower bound is snapped down to a bucket boundary before filtering.
-	// Filtering on the caller's raw timestamp would slice the leading bucket:
-	// an hourly-backed metric would drop the hours before it and report the
-	// remainder as a whole day, while active_accounts — already bucketed at the
-	// requested resolution — would drop that bucket entirely. Snapping keeps
-	// every returned bucket complete and makes both families agree.
+	// Both bounds are evaluated against whole buckets rather than the caller's
+	// raw instants, so the series is the set of buckets overlapping the range
+	// and each one carries its complete value.
+	//
+	// Comparing raw instants sliced the edges differently for each metric
+	// family. At the leading edge an hourly-backed metric dropped the hours
+	// before the instant and reported the remainder as a whole day, while
+	// active_accounts — already bucketed at the requested resolution — dropped
+	// the bucket entirely. At the trailing edge the reverse: the hourly-backed
+	// metric reported a truncated day while active_accounts reported the full
+	// one. The same request therefore returned series of different lengths
+	// carrying inconsistent values.
 	//
 	// The relation and value expression come from the tables above, never from
 	// request input; the caller-supplied values are all bound parameters.
@@ -128,7 +153,7 @@ func (s *PostgresStore) TimeSeries(
 		       (%s)::double precision AS value
 		FROM %s
 		WHERE bucket >= time_bucket($1::interval, $2::timestamptz)
-		  AND bucket < $3
+		  AND time_bucket($1::interval, bucket) < $3
 		GROUP BY ts
 		ORDER BY ts`, source.value, source.relation)
 

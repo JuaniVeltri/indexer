@@ -17,11 +17,12 @@ const hashLabelPrefix = 8
 // most valuable first. Every ranking breaks ties on a deterministic secondary
 // key so repeating a query returns the same order.
 //
-// The lower bound is widened to the enclosing hour. Two of the three rankings
-// read hourly aggregates, where the bucket holding an arbitrary instant would
-// otherwise be excluded outright — shrinking a 24-hour window to as little as
-// 23h01m depending on the minute the request arrives. highest_fees reads raw
-// rows and is widened the same way so all three cover an identical range.
+// Both bounds are snapped to whole hours, because two of the three rankings
+// read hourly aggregates and cannot resolve anything finer. Comparing raw
+// instants against hour-aligned buckets shrank a 24-hour window to as little as
+// 23h01m at the start while admitting the whole in-progress hour at the end —
+// including rows dated after the window. highest_fees reads raw rows and is
+// snapped identically, so all three cover exactly the same range.
 func (s *PostgresStore) TopN(
 	ctx context.Context,
 	metric analytics.TopMetric,
@@ -52,7 +53,8 @@ func (s *PostgresStore) topContractActivity(ctx context.Context, since, until ti
 		       c.token_symbol
 		FROM analytics_contract_activity_hourly a
 		LEFT JOIN contracts c ON c.contract_id = a.contract_id
-		WHERE a.bucket >= time_bucket(INTERVAL '1 hour', $1::timestamptz) AND a.bucket < $2
+		WHERE a.bucket >= time_bucket(INTERVAL '1 hour', $1::timestamptz)
+		  AND a.bucket < time_bucket(INTERVAL '1 hour', $2::timestamptz)
 		GROUP BY a.contract_id, c.label, c.token_name, c.contract_type, c.token_symbol
 		ORDER BY value DESC, a.contract_id
 		LIMIT $3`, since, until, limit)
@@ -89,7 +91,7 @@ func (s *PostgresStore) topContractActivity(ctx context.Context, since, until ti
 // each asset's base units, so they are scaled by the asset's decimals — falling
 // back to the classic Stellar precision of 7 — before assets are compared.
 func (s *PostgresStore) topAssetTransfers(ctx context.Context, since, until time.Time, limit int) ([]analytics.TopEntry, error) {
-	rows, err := s.db.QueryContext(ctx, `
+	query := fmt.Sprintf(`
 		WITH scaled AS (
 			SELECT
 				-- The CASE is wrapped rather than each branch guarded: the schema
@@ -106,12 +108,13 @@ func (s *PostgresStore) topAssetTransfers(ctx context.Context, since, until time
 				) AS id,
 				COALESCE(NULLIF(t.asset_code, ''), c.token_symbol, t.asset_contract_id, 'unknown') AS label,
 				t.asset_issuer AS issuer,
-				`+safeDecimals+` AS decimals,
-				t.amount_transferred / (10::numeric ^ `+safeDecimals+`) AS units,
+				%[1]s AS decimals,
+				t.amount_transferred / (10::numeric ^ %[1]s) AS units,
 				t.transfer_count
 			FROM analytics_asset_transfers_hourly t
 			LEFT JOIN contracts c ON c.contract_id = t.asset_contract_id
-			WHERE t.bucket >= time_bucket(INTERVAL '1 hour', $1::timestamptz) AND t.bucket < $2
+			WHERE t.bucket >= time_bucket(INTERVAL '1 hour', $1::timestamptz)
+				  AND t.bucket < time_bucket(INTERVAL '1 hour', $2::timestamptz)
 		)
 		SELECT id,
 		       MIN(label) AS label,
@@ -122,7 +125,9 @@ func (s *PostgresStore) topAssetTransfers(ctx context.Context, since, until time
 		FROM scaled
 		GROUP BY id
 		ORDER BY value DESC, id
-		LIMIT $3`, since, until, limit)
+		LIMIT $3`, decimalsExpr("t"))
+
+	rows, err := s.db.QueryContext(ctx, query, since, until, limit)
 	if err != nil {
 		return nil, fmt.Errorf("query asset transfers: %w", err)
 	}
@@ -166,7 +171,8 @@ func (s *PostgresStore) topHighestFees(ctx context.Context, since, until time.Ti
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT hash, fee_charged, account, is_soroban
 		FROM transactions
-		WHERE created_at >= time_bucket(INTERVAL '1 hour', $1::timestamptz) AND created_at < $2
+		WHERE created_at >= time_bucket(INTERVAL '1 hour', $1::timestamptz)
+		  AND created_at < time_bucket(INTERVAL '1 hour', $2::timestamptz)
 		ORDER BY fee_charged DESC, hash
 		LIMIT $3`, since, until, limit)
 	if err != nil {

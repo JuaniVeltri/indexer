@@ -43,12 +43,12 @@ The two listen addresses serve different processes and should be treated differe
 | Address | Process | Serves | Exposure |
 | ------- | ------- | ------ | -------- |
 | `METRICS_ADDR` | `live` | `/metrics`, `/healthz` | Internal. Ingestion telemetry only. |
-| `API_ADDR` | `serve` | `/api/v1/analytics/*`, **plus** `/metrics` and `/healthz` for that process | Public, if the explorer is public. |
+| `API_ADDR` | `serve` | `/api/v1/analytics/*` and `/healthz` | Public, if the explorer is public. |
 
-`serve` exposes `/metrics` and `/healthz` for its own process on the same port as the API, so an
-orchestrator can probe it. Those report the API process, not the ingestion pipeline — the analytics
-API is never mounted on `live`. If the API port faces the internet and the process telemetry should
-not, put the API behind a proxy that only forwards `/api/v1/`.
+`serve` exposes `/healthz` so an orchestrator can probe it, but not `/metrics`: the registry holds
+ingestion counters, and publishing them from a process that never ingests reports every one as zero,
+dragging down any average or minimum an alert is built on. The analytics API is likewise never
+mounted on `live`.
 
 ### Observability
 
@@ -201,6 +201,9 @@ docker compose -f infra/docker-compose.yml exec postgres psql -U explorer -d ste
     contract_events, token_events, assets, trades, network_stats, ingestion_state CASCADE;
 "
 ```
+
+Truncating does not empty the analytics aggregates — their materialized data and watermarks survive.
+Re-apply migration `000014` (down, then up) to reset them as well.
 
 To reset only the ingestion cursor (keeps existing data but allows re-ingestion):
 

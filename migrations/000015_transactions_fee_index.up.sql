@@ -11,4 +11,4 @@
 -- and golang-migrate sends each migration file to the server as a single
 -- multi-statement query, which Postgres wraps in an implicit transaction. A
 -- file holding this one statement is the only form that satisfies both.
-CREATE INDEX idx_tx_fee_charged ON transactions (fee_charged DESC, created_at DESC) WITH (timescaledb.transaction_per_chunk);
+CREATE INDEX IF NOT EXISTS idx_tx_fee_charged ON transactions (fee_charged DESC, created_at DESC) WITH (timescaledb.transaction_per_chunk);

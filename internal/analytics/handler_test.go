@@ -207,3 +207,50 @@ func TestEndpointsRejectNonGetMethods(t *testing.T) {
 		}
 	}
 }
+
+// blockingReader stalls until its context is cancelled, standing in for a query
+// that outlives its welcome.
+type blockingReader struct{}
+
+func (blockingReader) TimeSeries(ctx context.Context, _ Metric, _ Resolution, _, _ time.Time) ([]TimeSeriesPoint, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (blockingReader) TopN(ctx context.Context, _ TopMetric, _, _ time.Time, _ int) ([]TopEntry, error) {
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+// A request must not hold a database connection indefinitely. The server's
+// write timeout closes the client connection but leaves the statement running
+// and its pool slot held, so the handler has to bound the work itself.
+func TestSlowQueriesAreCutOffByTheirDeadline(t *testing.T) {
+	h := NewHandler(blockingReader{}, []string{AllowAllOrigins})
+	h.now = func() time.Time { return frozenNow }
+	h.queryTimeout = 50 * time.Millisecond
+
+	mux := http.NewServeMux()
+	h.Register(mux)
+
+	for _, target := range []string{
+		"/api/v1/analytics/timeseries?metric=tx_count&resolution=hourly&from=2026-08-20T19:00:00Z&to=2026-08-20T21:00:00Z",
+		"/api/v1/analytics/top?metric=highest_fees&window=24h",
+	} {
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() {
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, target, nil))
+			done <- rec
+		}()
+
+		select {
+		case rec := <-done:
+			if rec.Code != http.StatusInternalServerError {
+				t.Errorf("%s: status = %d, want 500 once the deadline passes", target, rec.Code)
+			}
+		case <-time.After(5 * time.Second):
+			t.Errorf("%s: handler never returned — the query is not bounded", target)
+		}
+	}
+}

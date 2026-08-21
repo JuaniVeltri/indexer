@@ -46,8 +46,9 @@ type AnalyticsRefreshResult struct {
 }
 
 // RefreshAnalyticsAggregates materializes every analytics aggregate over
-// [from, to]. Zero-valued bounds are passed through as NULL, which TimescaleDB
-// reads as the full extent of the data that changed.
+// [from, to]. A zero start reaches as far back as the data goes; a zero end is
+// resolved to the last completed bucket rather than left open, so the bucket
+// currently being written is never frozen at a partial value.
 //
 // TimescaleDB refreshes only buckets that fit entirely inside the window, and
 // raises an error rather than doing nothing when none do. Each window is
@@ -94,8 +95,9 @@ func (s *PostgresStore) RefreshAnalyticsAggregates(ctx context.Context, from, to
 }
 
 // snapToBuckets rounds the window bounds down to bucket boundaries and reports
-// whether a complete bucket survives between them. Either bound may be zero,
-// meaning unbounded, in which case it is passed through as NULL.
+// whether a complete bucket survives between them. A zero start means "as far
+// back as the data goes"; a zero end is resolved to the present, never left
+// open.
 //
 // The rounding is delegated to time_bucket rather than computed in Go, because
 // its origin is not the UNIX epoch: buckets of a day or more are measured from
@@ -106,14 +108,14 @@ func (s *PostgresStore) snapToBuckets(
 	bucket string,
 	from, to time.Time,
 ) (start, end any, hasFullBucket bool, err error) {
-	if from.IsZero() && to.IsZero() {
-		return nil, nil, true, nil
-	}
-
+	// An open upper bound is resolved to the present rather than left NULL.
+	// NULL would refresh through the bucket currently being written, freezing
+	// it at a partial value: the watermark advances past it and never moves
+	// back, so nothing corrects it until a policy happens to reach that far.
 	var snappedFrom, snappedTo *time.Time
 	err = s.db.QueryRowContext(ctx, `
 		SELECT time_bucket($1::interval, $2::timestamptz),
-		       time_bucket($1::interval, $3::timestamptz)`,
+		       time_bucket($1::interval, COALESCE($3::timestamptz, now()))`,
 		bucket, nullableTime(from), nullableTime(to),
 	).Scan(&snappedFrom, &snappedTo)
 	if err != nil {

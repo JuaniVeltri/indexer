@@ -46,7 +46,10 @@ SELECT
     SUM(amount)                                AS stroops_transferred,
     COUNT(*)                                   AS transfer_count
 FROM token_events
-WHERE event_type_name = 'transfer'
+-- event_type rather than event_type_name: the index and the compression
+-- segment-by are on the numeric column, so filtering on the text one scans and
+-- decompresses instead of pruning. 0 = transfer.
+WHERE event_type = 0
   AND asset_type = 0
 GROUP BY bucket
 WITH NO DATA;
@@ -58,7 +61,9 @@ SELECT
     time_bucket(INTERVAL '1 hour', created_at) AS bucket,
     COUNT(*)                                   AS new_accounts
 FROM operations
-WHERE type_name = 'create_account'
+-- type rather than type_name, to use idx_op_type and the compression
+-- segment-by. 0 = create_account.
+WHERE type = 0
 GROUP BY bucket
 WITH NO DATA;
 
@@ -101,9 +106,10 @@ SELECT
     asset_code,
     asset_issuer,
     asset_contract_id,
-    SUM(CASE WHEN event_type_name = 'mint' THEN amount ELSE -amount END) AS net_supply_delta
+    SUM(CASE WHEN event_type = 1 THEN amount ELSE -amount END) AS net_supply_delta
 FROM token_events
-WHERE event_type_name IN ('mint', 'burn', 'clawback')
+-- 1 = mint, 2 = burn, 3 = clawback.
+WHERE event_type IN (1, 2, 3)
 GROUP BY bucket, asset_type, asset_code, asset_issuer, asset_contract_id
 WITH NO DATA;
 
@@ -120,7 +126,7 @@ SELECT
     SUM(amount)                                AS amount_transferred,
     COUNT(*)                                   AS transfer_count
 FROM token_events
-WHERE event_type_name = 'transfer'
+WHERE event_type = 0
 GROUP BY bucket, asset_type, asset_code, asset_issuer, asset_contract_id
 WITH NO DATA;
 

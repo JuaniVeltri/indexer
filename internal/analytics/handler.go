@@ -9,6 +9,13 @@ import (
 	"time"
 )
 
+// queryTimeout bounds how long a single request may occupy a database
+// connection. The server's write timeout does not reach the query: it closes
+// the connection while the statement keeps running and its pool slot stays
+// held, so a burst of slow requests can exhaust the pool. Cancelling the
+// context releases both.
+const queryTimeout = 10 * time.Second
+
 // Route paths, kept together because the explorer's client hard-codes them.
 const (
 	timeSeriesPath = "GET /api/v1/analytics/timeseries"
@@ -33,12 +40,20 @@ type Handler struct {
 	// now resolves the end of a Top-N rolling window. Kept as a field so tests
 	// can freeze it.
 	now func() time.Time
+	// queryTimeout bounds a single request's database work. Kept as a field so
+	// tests can shorten it.
+	queryTimeout time.Duration
 }
 
 // NewHandler builds a Handler reading from the given source and answering
 // cross-origin requests from allowedOrigins.
 func NewHandler(reader Reader, allowedOrigins []string) *Handler {
-	return &Handler{reader: reader, allowedOrigins: allowedOrigins, now: time.Now}
+	return &Handler{
+		reader:         reader,
+		allowedOrigins: allowedOrigins,
+		now:            time.Now,
+		queryTimeout:   queryTimeout,
+	}
 }
 
 // Register mounts the analytics routes on mux.
@@ -60,7 +75,10 @@ func (h *Handler) handleTimeSeries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	points, err := h.reader.TimeSeries(r.Context(), req.Metric, req.Resolution, req.From, req.To)
+	ctx, cancel := context.WithTimeout(r.Context(), h.queryTimeout)
+	defer cancel()
+
+	points, err := h.reader.TimeSeries(ctx, req.Metric, req.Resolution, req.From, req.To)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -87,7 +105,10 @@ func (h *Handler) handleTop(w http.ResponseWriter, r *http.Request) {
 	until := h.now().UTC()
 	since := until.Add(-req.Window.Duration())
 
-	entries, err := h.reader.TopN(r.Context(), req.Metric, since, until, req.Limit)
+	ctx, cancel := context.WithTimeout(r.Context(), h.queryTimeout)
+	defer cancel()
+
+	entries, err := h.reader.TopN(ctx, req.Metric, since, until, req.Limit)
 	if err != nil {
 		writeError(w, err)
 		return

@@ -41,6 +41,14 @@ func (h *Handler) handlePreflight(w http.ResponseWriter, r *http.Request) {
 // these endpoints expose nothing that needs protecting.
 func (h *Handler) setCORSHeaders(w http.ResponseWriter, origin string) {
 	allowed, ok := h.resolveOrigin(origin)
+
+	// Vary is set whether or not access is granted, and before the early
+	// return: with a per-origin allow-list the response differs by origin even
+	// when the difference is the absence of the header, and a shared cache that
+	// did not key on it could hand an allowed origin a denied response.
+	if !slices.Contains(h.allowedOrigins, AllowAllOrigins) {
+		w.Header().Add("Vary", "Origin")
+	}
 	if !ok {
 		return
 	}
@@ -49,11 +57,6 @@ func (h *Handler) setCORSHeaders(w http.ResponseWriter, origin string) {
 	w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
 	w.Header().Set("Access-Control-Allow-Headers", "Accept, Content-Type")
 	w.Header().Set("Access-Control-Max-Age", preflightMaxAge)
-
-	if allowed != AllowAllOrigins {
-		// The response varies by origin, so a shared cache must key on it.
-		w.Header().Add("Vary", "Origin")
-	}
 }
 
 // resolveOrigin reports the value to echo back for the requesting origin.

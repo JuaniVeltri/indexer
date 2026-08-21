@@ -184,3 +184,38 @@ func TestLoad_CORSOriginsSplitAndTrimmed(t *testing.T) {
 		}
 	}
 }
+
+// An empty value is the documented way to refuse cross-origin access, so it
+// must not fall back to the wildcard the way the other settings do.
+func TestLoad_EmptyCORSOriginsDisablesCrossOrigin(t *testing.T) {
+	os.Setenv("API_CORS_ORIGINS", "")
+	defer os.Unsetenv("API_CORS_ORIGINS")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.APICORSOrigins) != 0 {
+		t.Errorf("expected no allowed origins, got %v", cfg.APICORSOrigins)
+	}
+}
+
+func TestLoad_RejectsUnusableAPIAddresses(t *testing.T) {
+	for _, addr := range []string{":", "localhost:", ":0", ":-1", ":99999", "8080"} {
+		os.Setenv("API_ADDR", addr)
+		if _, err := Load(); err == nil {
+			t.Errorf("API_ADDR=%q was accepted, want an error", addr)
+		}
+		os.Unsetenv("API_ADDR")
+	}
+}
+
+func TestLoad_AcceptsUsableAPIAddresses(t *testing.T) {
+	for _, addr := range []string{":8080", "127.0.0.1:9000", "0.0.0.0:1", "[::1]:8080"} {
+		os.Setenv("API_ADDR", addr)
+		if _, err := Load(); err != nil {
+			t.Errorf("API_ADDR=%q was rejected: %v", addr, err)
+		}
+		os.Unsetenv("API_ADDR")
+	}
+}

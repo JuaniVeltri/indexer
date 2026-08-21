@@ -62,7 +62,10 @@ func main() {
 
 // shutdownTimeout bounds how long a graceful shutdown waits for in-flight
 // requests before the process gives up on them.
-const shutdownTimeout = 5 * time.Second
+//
+// It must exceed the server's write timeout so a request already in flight can
+// finish rather than being cut off by the drain.
+const shutdownTimeout = 20 * time.Second
 
 func setupContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -102,7 +105,10 @@ func runLive(cfg *config.Config) {
 		// pipeline's connection pool, so a burst of dashboard queries could
 		// exhaust it, stall ingestion writes, and trip the /healthz staleness
 		// check into a restart. Run it as its own process with `serve`.
-		srv := httpserver.New(cfg.MetricsAddr, db.DB(), nil, nil)
+		srv := httpserver.New(cfg.MetricsAddr, httpserver.Options{
+			DB:            db.DB(),
+			ExposeMetrics: true,
+		})
 		go func() {
 			log.Printf("metrics server listening on %s (/metrics, /healthz)", cfg.MetricsAddr)
 			if err := srv.Start(); err != nil {
@@ -153,7 +159,11 @@ func runServe(cfg *config.Config) {
 	}
 	defer db.Close()
 
-	srv := httpserver.New(cfg.APIAddr, db.DB(), db, cfg.APICORSOrigins)
+	srv := httpserver.New(cfg.APIAddr, httpserver.Options{
+		DB:             db.DB(),
+		Analytics:      db,
+		AllowedOrigins: cfg.APICORSOrigins,
+	})
 
 	drained := make(chan struct{})
 	go func() {
@@ -166,7 +176,7 @@ func runServe(cfg *config.Config) {
 		}
 	}()
 
-	log.Printf("analytics API listening on %s (/api/v1/analytics, /metrics, /healthz)", cfg.APIAddr)
+	log.Printf("analytics API listening on %s (/api/v1/analytics, /healthz)", cfg.APIAddr)
 	if err := srv.Start(); err != nil {
 		log.Fatalf("API server failed: %v", err)
 	}
@@ -270,7 +280,23 @@ func runAnalyticsBackfill(cfg *config.Config) {
 		log.Fatalf("Analytics backfill stopped after %d of %d aggregates: %v",
 			len(results), store.AnalyticsAggregateCount(), err)
 	}
-	log.Println("Analytics backfill complete.")
+
+	// Every aggregate being skipped means the window was narrower than any
+	// bucket, so nothing was materialized. Exiting zero there would let a
+	// deploy step gated on this command proceed to serve empty aggregates.
+	refreshed := 0
+	for _, r := range results {
+		if !r.Skipped {
+			refreshed++
+		}
+	}
+	if refreshed == 0 {
+		log.Fatalf("Analytics backfill refreshed nothing: the window holds no complete bucket for any of the %d aggregates",
+			store.AnalyticsAggregateCount())
+	}
+
+	log.Printf("Analytics backfill complete: %d of %d aggregates refreshed.",
+		refreshed, store.AnalyticsAggregateCount())
 }
 
 // parseAnalyticsWindowFlags reads the optional --from/--to RFC 3339 bounds,
