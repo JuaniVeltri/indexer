@@ -166,3 +166,36 @@ func TestTopNRespectsTheLimit(t *testing.T) {
 		t.Errorf("got %d entries, want 3", len(entries))
 	}
 }
+
+// TestTopNAssetTransfersToleratesIncompleteAssetIdentity guards a scan failure.
+// The schema allows a null asset_code beside a non-null issuer, and a null
+// anywhere in a SQL concatenation makes the whole expression null — which would
+// fail to scan into the entry identifier and turn the endpoint into a 500.
+func TestTopNAssetTransfersToleratesIncompleteAssetIdentity(t *testing.T) {
+	store := getTestDB(t)
+	defer store.Close()
+
+	_, _, cleanup := insertAnalyticsFixture(t, store)
+	defer cleanup()
+
+	mustExec(t, store, `
+		INSERT INTO token_events (event_type, event_type_name, asset_type, asset_code,
+			asset_issuer, amount, transaction_hash, ledger_sequence, created_at)
+		VALUES (0, 'transfer', 1, NULL, $1, '5000000', $2, 900500, $3)`,
+		fixtureIssuer, fixtureHash("te-nullcode"), fixtureBase.Add(30*time.Minute))
+
+	if _, err := store.RefreshAnalyticsAggregates(context.Background(), fixtureSince, fixtureUntil); err != nil {
+		t.Fatalf("refresh: %v", err)
+	}
+
+	entries, err := store.TopN(context.Background(), analytics.TopAssetTransfers, fixtureSince, fixtureUntil, 10)
+	if err != nil {
+		t.Fatalf("TopN must survive an asset with no code: %v", err)
+	}
+
+	for _, e := range entries {
+		if e.ID == "" {
+			t.Errorf("entry identifier must never be empty: %+v", e)
+		}
+	}
+}

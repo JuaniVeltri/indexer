@@ -86,11 +86,18 @@ func (s *PostgresStore) topAssetTransfers(ctx context.Context, since, until time
 	rows, err := s.db.QueryContext(ctx, `
 		WITH scaled AS (
 			SELECT
-				CASE
-					WHEN t.asset_type = 0            THEN 'native'
-					WHEN t.asset_issuer IS NOT NULL  THEN t.asset_code || '-' || t.asset_issuer
-					ELSE COALESCE(t.asset_contract_id, 'unknown')
-				END AS id,
+				-- The CASE is wrapped rather than each branch guarded: the schema
+				-- allows a null asset_code beside a non-null issuer, and a null
+				-- anywhere in a concatenation makes the whole identifier null,
+				-- which would fail to scan and take the endpoint down with it.
+				COALESCE(
+					CASE
+						WHEN t.asset_type = 0            THEN 'native'
+						WHEN t.asset_issuer IS NOT NULL  THEN t.asset_code || '-' || t.asset_issuer
+						ELSE t.asset_contract_id
+					END,
+					'unknown'
+				) AS id,
 				COALESCE(NULLIF(t.asset_code, ''), c.token_symbol, t.asset_contract_id, 'unknown') AS label,
 				t.asset_issuer AS issuer,
 				COALESCE(c.token_decimals, 7) AS decimals,
