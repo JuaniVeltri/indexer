@@ -5,6 +5,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/stellar/go-stellar-sdk/network"
 )
@@ -19,19 +20,24 @@ type Config struct {
 	WorkerCount  int
 	MetricsAddr  string // listen address for /metrics and /healthz; disabled when empty
 	APIAddr      string // listen address for the read API served by the serve command
+	// APICORSOrigins is the CORS allow-list for the read API. "*" allows any
+	// browser, which suits a public read-only surface; an empty list disables
+	// cross-origin access.
+	APICORSOrigins []string
 }
 
 func Load() (*Config, error) {
 	cfg := &Config{
-		DatabaseURL:  getEnv("DATABASE_URL", "postgresql://explorer:explorer_dev@localhost:54320/stellar_explorer?sslmode=disable"),
-		RedisURL:     getEnv("REDIS_URL", "redis://localhost:63790"),
-		RPCEndpoint:  getEnv("RPC_ENDPOINT", ""),
-		DataLakePath: getEnv("DATA_LAKE_PATH", "s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet"),
-		Network:      getEnv("NETWORK", "public"),
-		BatchSize:    getEnvInt("BATCH_SIZE", 100),
-		WorkerCount:  getEnvInt("WORKER_COUNT", 8),
-		MetricsAddr:  getEnv("METRICS_ADDR", ""),
-		APIAddr:      getEnv("API_ADDR", ":8080"),
+		DatabaseURL:    getEnv("DATABASE_URL", "postgresql://explorer:explorer_dev@localhost:54320/stellar_explorer?sslmode=disable"),
+		RedisURL:       getEnv("REDIS_URL", "redis://localhost:63790"),
+		RPCEndpoint:    getEnv("RPC_ENDPOINT", ""),
+		DataLakePath:   getEnv("DATA_LAKE_PATH", "s3://aws-public-blockchain/v1.1/stellar/ledgers/pubnet"),
+		Network:        getEnv("NETWORK", "public"),
+		BatchSize:      getEnvInt("BATCH_SIZE", 100),
+		WorkerCount:    getEnvInt("WORKER_COUNT", 8),
+		MetricsAddr:    getEnv("METRICS_ADDR", ""),
+		APIAddr:        getEnv("API_ADDR", ":8080"),
+		APICORSOrigins: splitList(getEnv("API_CORS_ORIGINS", "*")),
 	}
 
 	if err := cfg.validate(); err != nil {
@@ -85,6 +91,18 @@ func getEnv(key, fallback string) string {
 		return val
 	}
 	return fallback
+}
+
+// splitList parses a comma-separated environment value, dropping blanks so a
+// trailing comma or stray space cannot introduce an empty origin.
+func splitList(raw string) []string {
+	var items []string
+	for _, item := range strings.Split(raw, ",") {
+		if trimmed := strings.TrimSpace(item); trimmed != "" {
+			items = append(items, trimmed)
+		}
+	}
+	return items
 }
 
 func getEnvInt(key string, fallback int) int {

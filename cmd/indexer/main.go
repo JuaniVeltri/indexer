@@ -2,12 +2,12 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -60,6 +60,10 @@ func main() {
 	}
 }
 
+// shutdownTimeout bounds how long a graceful shutdown waits for in-flight
+// requests before the process gives up on them.
+const shutdownTimeout = 5 * time.Second
+
 func setupContext() (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancel(context.Background())
 	sigCh := make(chan os.Signal, 1)
@@ -94,7 +98,11 @@ func runLive(cfg *config.Config) {
 	defer db.Close()
 
 	if cfg.MetricsAddr != "" {
-		srv := httpserver.New(cfg.MetricsAddr, db.DB(), db)
+		// The analytics API is deliberately not mounted here. It would share the
+		// pipeline's connection pool, so a burst of dashboard queries could
+		// exhaust it, stall ingestion writes, and trip the /healthz staleness
+		// check into a restart. Run it as its own process with `serve`.
+		srv := httpserver.New(cfg.MetricsAddr, db.DB(), nil, nil)
 		go func() {
 			log.Printf("metrics server listening on %s (/metrics, /healthz)", cfg.MetricsAddr)
 			if err := srv.Start(); err != nil {
@@ -144,11 +152,13 @@ func runServe(cfg *config.Config) {
 	}
 	defer db.Close()
 
-	srv := httpserver.New(cfg.APIAddr, db.DB(), db)
+	srv := httpserver.New(cfg.APIAddr, db.DB(), db, cfg.APICORSOrigins)
 
+	drained := make(chan struct{})
 	go func() {
+		defer close(drained)
 		<-ctx.Done()
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer shutdownCancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			log.Printf("api server shutdown error: %v", err)
@@ -159,6 +169,12 @@ func runServe(cfg *config.Config) {
 	if err := srv.Start(); err != nil {
 		log.Fatalf("API server failed: %v", err)
 	}
+
+	// Start returns as soon as the listener closes, which is the beginning of
+	// the shutdown rather than the end of it. Waiting for the drain keeps the
+	// deferred db.Close() from pulling the pool out from under requests that
+	// are still being served.
+	<-drained
 	log.Println("Shutdown complete.")
 }
 
@@ -214,6 +230,15 @@ func runS3Backfill(cfg *config.Config) {
 // skips buckets that are already materialized, so an interrupted run resumes.
 func runAnalyticsBackfill(cfg *config.Config) {
 	from, to := parseAnalyticsWindowFlags()
+	if to.IsZero() {
+		// An open upper bound would materialize the bucket currently being
+		// written and advance the watermark past it. Watermarks never move
+		// back, so that bucket would then be frozen at its partial value until
+		// a refresh policy reached it again — up to ten days for the weekly
+		// aggregate. Ending at the present lets each aggregate snap down to its
+		// last completed bucket instead.
+		to = time.Now().UTC()
+	}
 
 	ctx, cancel := setupContext()
 	defer cancel()
@@ -237,37 +262,71 @@ func runAnalyticsBackfill(cfg *config.Config) {
 		log.Printf("  %-38s refreshed in %s", r.Aggregate, r.Duration.Round(time.Millisecond))
 	}
 
-	if err != nil && !errors.Is(err, context.Canceled) {
-		log.Fatalf("Analytics backfill failed: %v", err)
+	// Any failure, interruption included, leaves later aggregates untouched.
+	// Reporting success would let a deploy step gated on the exit status start
+	// serving from aggregates that were never populated.
+	if err != nil {
+		log.Fatalf("Analytics backfill stopped after %d of %d aggregates: %v",
+			len(results), store.AnalyticsAggregateCount, err)
 	}
 	log.Println("Analytics backfill complete.")
 }
 
-// parseAnalyticsWindowFlags reads the optional --from/--to RFC 3339 bounds.
-// An omitted bound means "as far as the data goes" in that direction.
+// parseAnalyticsWindowFlags reads the optional --from/--to RFC 3339 bounds,
+// in either the "--from X" or "--from=X" form. Omitting --from reaches as far
+// back as the data goes; omitting --to ends at the present.
+//
+// Anything unrecognised is rejected rather than ignored. Silently skipping a
+// typo would turn a scoped repair into a refresh of all history, which on a
+// populated database is hours of I/O that cannot be undone.
 func parseAnalyticsWindowFlags() (from, to time.Time) {
-	parse := func(flag, raw string) time.Time {
-		ts, err := time.Parse(time.RFC3339, raw)
-		if err != nil {
-			log.Fatalf("Invalid %s value %q: expected RFC 3339, e.g. 2026-01-01T00:00:00Z", flag, raw)
+	from, to, err := parseAnalyticsWindow(os.Args[2:])
+	if err != nil {
+		log.Fatalf("%v\nUsage: indexer analytics-backfill [--from RFC3339] [--to RFC3339]", err)
+	}
+	return from, to
+}
+
+// parseAnalyticsWindow reads the optional --from/--to RFC 3339 bounds from the
+// arguments following the subcommand, in either the "--from X" or "--from=X"
+// form. A zero bound means unbounded in that direction.
+func parseAnalyticsWindow(args []string) (from, to time.Time, err error) {
+	parse := func(flag, raw string) (time.Time, error) {
+		ts, parseErr := time.Parse(time.RFC3339, raw)
+		if parseErr != nil {
+			return time.Time{}, fmt.Errorf("invalid %s value %q: expected RFC 3339, e.g. 2026-01-01T00:00:00Z", flag, raw)
 		}
-		return ts.UTC()
+		return ts.UTC(), nil
 	}
 
-	for i := 2; i < len(os.Args)-1; i++ {
-		switch os.Args[i] {
+	for i := 0; i < len(args); i++ {
+		flag, value, inline := strings.Cut(args[i], "=")
+		if !inline {
+			if i+1 >= len(args) {
+				return time.Time{}, time.Time{}, fmt.Errorf("missing value for %s", args[i])
+			}
+			i++
+			value = args[i]
+		}
+
+		switch flag {
 		case "--from":
-			from = parse("--from", os.Args[i+1])
+			from, err = parse("--from", value)
 		case "--to":
-			to = parse("--to", os.Args[i+1])
+			to, err = parse("--to", value)
+		default:
+			return time.Time{}, time.Time{}, fmt.Errorf("unknown flag %q", flag)
+		}
+		if err != nil {
+			return time.Time{}, time.Time{}, err
 		}
 	}
 
 	if !from.IsZero() && !to.IsZero() && !from.Before(to) {
-		log.Fatalf("Invalid window: --from (%s) must be before --to (%s)",
+		return time.Time{}, time.Time{}, fmt.Errorf("--from (%s) must be before --to (%s)",
 			from.Format(time.RFC3339), to.Format(time.RFC3339))
 	}
-	return from, to
+	return from, to, nil
 }
 
 func parseBackfillFlags() (uint32, uint32) {

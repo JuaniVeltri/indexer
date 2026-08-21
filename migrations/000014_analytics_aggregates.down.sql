@@ -10,4 +10,3 @@ DROP MATERIALIZED VIEW IF EXISTS analytics_new_accounts_hourly CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS analytics_volume_hourly CASCADE;
 DROP MATERIALIZED VIEW IF EXISTS analytics_tx_hourly CASCADE;
 
-DROP INDEX IF EXISTS idx_tx_fee_charged;

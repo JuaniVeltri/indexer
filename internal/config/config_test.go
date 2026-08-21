@@ -153,3 +153,34 @@ func TestLoad_InvalidAPIAddr(t *testing.T) {
 		t.Fatal("expected error for API_ADDR without a port separator, got nil")
 	}
 }
+
+func TestLoad_CORSOriginsDefaultToWildcard(t *testing.T) {
+	os.Unsetenv("API_CORS_ORIGINS")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cfg.APICORSOrigins) != 1 || cfg.APICORSOrigins[0] != "*" {
+		t.Errorf("expected default APICORSOrigins ['*'], got %v", cfg.APICORSOrigins)
+	}
+}
+
+func TestLoad_CORSOriginsSplitAndTrimmed(t *testing.T) {
+	os.Setenv("API_CORS_ORIGINS", " https://a.example.com , https://b.example.com ,")
+	defer os.Unsetenv("API_CORS_ORIGINS")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := []string{"https://a.example.com", "https://b.example.com"}
+	if len(cfg.APICORSOrigins) != len(want) {
+		t.Fatalf("got %v, want %v", cfg.APICORSOrigins, want)
+	}
+	for i := range want {
+		if cfg.APICORSOrigins[i] != want[i] {
+			t.Errorf("origin %d = %q, want %q", i, cfg.APICORSOrigins[i], want[i])
+		}
+	}
+}

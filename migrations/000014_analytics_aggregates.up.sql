@@ -177,8 +177,3 @@ SELECT add_continuous_aggregate_policy('analytics_asset_transfers_hourly',
 SELECT add_continuous_aggregate_policy('analytics_contract_activity_hourly',
     start_offset => INTERVAL '30 days', end_offset => INTERVAL '1 hour',
     schedule_interval => INTERVAL '30 minutes');
-
--- The highest_fees ranking reads individual transactions, which no aggregate can
--- summarise. Ordering the index by fee lets each chunk be scanned in fee order
--- and merge-appended, so a windowed LIMIT stays cheap.
-CREATE INDEX idx_tx_fee_charged ON transactions (fee_charged DESC, created_at DESC);

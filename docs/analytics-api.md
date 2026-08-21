@@ -13,9 +13,14 @@ the empty-result behaviour must not change without coordinating with that reposi
 API_ADDR=:8080 ./bin/indexer serve
 ```
 
-`serve` starts only the read API — no ingestion — which is what the explorer's
-`NEXT_PUBLIC_INDEXER_URL` points at. The same routes are also mounted on the `live` command's
-metrics server when `METRICS_ADDR` is set, which is convenient in development.
+`serve` runs the read API as its own process, which is what the explorer's `NEXT_PUBLIC_INDEXER_URL`
+points at. It is deliberately not mounted on the `live` command: sharing that process would put
+dashboard queries on the ingestion connection pool, where a burst can exhaust it, stall writes, and
+trip the `/healthz` staleness check into a restart.
+
+`API_CORS_ORIGINS` sets the browser allow-list, defaulting to `*` — appropriate for a read-only
+public surface with no credentials. Set it to a comma-separated list to restrict access, or to an
+empty value to refuse cross-origin requests entirely.
 
 ## `GET /api/v1/analytics/timeseries`
 
@@ -105,6 +110,14 @@ Notes on the definitions:
 - **Amounts come from `amount`, not `amount_formatted`.** The latter is never populated by the
   transform layer, so stored base units are scaled by the asset's decimals at read time — falling
   back to the classic Stellar precision of 7.
+- **`new_accounts` counts `create_account` operations regardless of whether their transaction
+  succeeded.** Operations from failed transactions are persisted, and the metric cannot filter them:
+  TimescaleDB permits only one hypertable per continuous aggregate, so the aggregate cannot join
+  `operations` to `transactions.status` (verified — the definition is rejected outright). On a
+  sample of testnet data 1 of 1,932 create_account operations belonged to a failed transaction, but
+  nothing bounds that share under a wave of failing submissions. Fixing it properly means
+  denormalising the status onto `operations` during transform, or not persisting operations from
+  failed transactions at all.
 - **`asset_supply` sums signed deltas across every asset** when queried through this endpoint.
   Because assets have different units, that total is an activity indicator rather than a monetary
   figure. The underlying aggregate is stored per asset, so a per-asset series can be exposed later
@@ -116,6 +129,12 @@ Notes on the definitions:
 The explorer uses exactly that to render its "not available yet" state, so these endpoints never
 answer `404` for a valid-but-unpopulated metric. Only malformed parameters produce `400`, and only
 a genuine backend failure produces `500`.
+
+**The requested range is widened to whole buckets.** The lower bound is snapped down to the
+requested resolution, so a series asked for from the middle of a day starts at that day's boundary
+and every returned bucket is complete. Filtering on the raw instant instead would slice the leading
+bucket — reporting part of a day as the whole of it for most metrics, and dropping the bucket
+entirely for `active_accounts`. Top-N windows are widened the same way, to the enclosing hour.
 
 **Bucket boundaries follow `time_bucket`, in UTC.** Buckets of a day or more are measured from
 2000-01-03, not the UNIX epoch, which puts weekly boundaries on a **Monday**. Alignment is identical
@@ -174,13 +193,25 @@ The migration creates the aggregates empty (`WITH NO DATA`), so it applies insta
 that already holds history. Populate them once afterwards:
 
 ```bash
-./bin/indexer analytics-backfill                                  # everything in the ledgers table
+./bin/indexer analytics-backfill                                  # everything already ingested
 ./bin/indexer analytics-backfill --from 2026-01-01T00:00:00Z      # from a point in time
+./bin/indexer analytics-backfill --from=X --to=Y                  # a bounded repair
 ```
 
 The command refreshes each aggregate over the requested range. TimescaleDB processes the refresh in
 batches, each in its own transaction, so an interrupted run can simply be re-run — buckets already
-materialized are skipped.
+materialized are skipped. It exits non-zero if any aggregate was not refreshed, so a deploy step can
+gate on it.
+
+An omitted `--to` ends at the present rather than staying open. An open upper bound would
+materialize the bucket currently being written and advance the watermark past it; because watermarks
+never move back, that bucket would then stay frozen at its partial value until a refresh policy
+reached it again.
+
+**Run this after any historical import.** `backfill` and `s3backfill` write rows below the
+watermark, where real-time aggregation does not reach and the refresh policies — which look back 30
+days — will never revisit them. Without a follow-up refresh those ledgers stay invisible to the API,
+which reports them as an empty series rather than an error.
 
 ## References
 

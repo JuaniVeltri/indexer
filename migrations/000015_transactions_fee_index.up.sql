@@ -1,0 +1,14 @@
+-- Index backing the highest_fees ranking, which reads individual transactions
+-- because no aggregate can summarise them. Ordering by fee lets each chunk be
+-- scanned in fee order and merge-appended, so a windowed LIMIT stays cheap.
+--
+-- This lives in its own migration because of transaction_per_chunk. Building
+-- the index in one statement takes ACCESS EXCLUSIVE on the parent and every
+-- chunk at once, which on a mainnet-scale transactions table blocks ingestion
+-- long enough for the /healthz staleness check to trip and an orchestrator to
+-- restart the process mid-migration. transaction_per_chunk takes the lock one
+-- chunk at a time instead, but it refuses to run inside a transaction block —
+-- and golang-migrate sends each migration file to the server as a single
+-- multi-statement query, which Postgres wraps in an implicit transaction. A
+-- file holding this one statement is the only form that satisfies both.
+CREATE INDEX idx_tx_fee_charged ON transactions (fee_charged DESC, created_at DESC) WITH (timescaledb.transaction_per_chunk);

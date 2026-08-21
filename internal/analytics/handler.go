@@ -13,6 +13,7 @@ import (
 const (
 	timeSeriesPath = "GET /api/v1/analytics/timeseries"
 	topPath        = "GET /api/v1/analytics/top"
+	preflightPath  = "OPTIONS /api/v1/analytics/"
 )
 
 // Reader supplies the aggregated data behind the endpoints. It is declared here
@@ -26,20 +27,25 @@ type Reader interface {
 // Handler serves the analytics endpoints.
 type Handler struct {
 	reader Reader
+	// allowedOrigins is the CORS allow-list; AllowAllOrigins opens it to any
+	// browser. Empty disables cross-origin access entirely.
+	allowedOrigins []string
 	// now resolves the end of a Top-N rolling window. Kept as a field so tests
 	// can freeze it.
 	now func() time.Time
 }
 
-// NewHandler builds a Handler reading from the given source.
-func NewHandler(reader Reader) *Handler {
-	return &Handler{reader: reader, now: time.Now}
+// NewHandler builds a Handler reading from the given source and answering
+// cross-origin requests from allowedOrigins.
+func NewHandler(reader Reader, allowedOrigins []string) *Handler {
+	return &Handler{reader: reader, allowedOrigins: allowedOrigins, now: time.Now}
 }
 
 // Register mounts the analytics routes on mux.
 func (h *Handler) Register(mux *http.ServeMux) {
-	mux.HandleFunc(timeSeriesPath, h.handleTimeSeries)
-	mux.HandleFunc(topPath, h.handleTop)
+	mux.Handle(timeSeriesPath, h.withCORS(http.HandlerFunc(h.handleTimeSeries)))
+	mux.Handle(topPath, h.withCORS(http.HandlerFunc(h.handleTop)))
+	mux.HandleFunc(preflightPath, h.handlePreflight)
 }
 
 // errorResponse is the body returned for a rejected or failed request.

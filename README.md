@@ -34,6 +34,7 @@ make build
 | `WORKER_COUNT` | `8`                                                                                   | No       | Parallel workers for `backfill` and `s3backfill`          |
 | `METRICS_ADDR` | —                                                                                     | No       | Listen address (e.g. `:9090`) for `/metrics` and `/healthz` during `live` ingestion. Disabled when unset. |
 | `API_ADDR`     | `:8080`                                                                               | No       | Listen address for the read API served by `serve`.        |
+| `API_CORS_ORIGINS` | `*`                                                                               | No       | Comma-separated CORS allow-list for the read API. Empty refuses cross-origin requests. |
 
 ### Observability
 
@@ -119,8 +120,8 @@ curl 'localhost:8080/api/v1/analytics/timeseries?metric=tx_count&resolution=hour
 curl 'localhost:8080/api/v1/analytics/top?metric=contract_activity&window=24h&limit=10'
 ```
 
-`serve` runs the read API without ingesting; the same routes are also mounted on the `live` command's
-metrics server when `METRICS_ADDR` is set.
+`serve` runs the read API as its own process. It is not mounted on `live`, which would put dashboard
+queries on the ingestion connection pool.
 
 The aggregates are created empty by the migration, so populate them once from existing history:
 
@@ -128,6 +129,9 @@ The aggregates are created empty by the migration, so populate them once from ex
 ./bin/indexer analytics-backfill                              # everything already ingested
 ./bin/indexer analytics-backfill --from 2026-01-01T00:00:00Z  # from a point in time
 ```
+
+Run it again after any `backfill` or `s3backfill`: those write history below the aggregates'
+watermark, which no refresh policy reaches.
 
 Metric definitions, response shapes, and the aggregation layout are documented in
 [`docs/analytics-api.md`](docs/analytics-api.md).

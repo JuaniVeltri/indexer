@@ -26,6 +26,14 @@ const pingTimeout = 2 * time.Second
 // indefinitely once this server is exposed as a public read API.
 const readHeaderTimeout = 10 * time.Second
 
+// writeTimeout caps how long a single response may take, so one pathological
+// analytics query cannot hold a connection indefinitely. idleTimeout reclaims
+// keep-alive connections that have gone quiet.
+const (
+	writeTimeout = 30 * time.Second
+	idleTimeout  = 120 * time.Second
+)
+
 // pipelineStaleAfter is how long the ingestion loop can go without
 // completing a poll cycle before /healthz reports it as not advancing.
 // Ledgers close every ~5s, so this comfortably tolerates transient RPC
@@ -53,14 +61,14 @@ type Server struct {
 //
 // reader supplies the analytics read API. It may be nil, which mounts only the
 // operational endpoints — useful for a process that ingests but should not
-// serve queries.
-func New(addr string, db dbPinger, reader analytics.Reader) *Server {
+// serve queries. allowedOrigins is the CORS allow-list for those routes.
+func New(addr string, db dbPinger, reader analytics.Reader, allowedOrigins []string) *Server {
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}))
 	mux.HandleFunc("/healthz", healthzHandler(db, health.Stale))
 
 	if reader != nil {
-		analytics.NewHandler(reader).Register(mux)
+		analytics.NewHandler(reader, allowedOrigins).Register(mux)
 	}
 
 	return &Server{
@@ -68,6 +76,8 @@ func New(addr string, db dbPinger, reader analytics.Reader) *Server {
 			Addr:              addr,
 			Handler:           mux,
 			ReadHeaderTimeout: readHeaderTimeout,
+			WriteTimeout:      writeTimeout,
+			IdleTimeout:       idleTimeout,
 		},
 	}
 }

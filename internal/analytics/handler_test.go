@@ -41,7 +41,7 @@ func (f *fakeReader) TopN(_ context.Context, metric TopMetric, since, until time
 var frozenNow = time.Date(2026, 8, 20, 23, 0, 0, 0, time.UTC)
 
 func newTestHandler(reader Reader) *Handler {
-	h := NewHandler(reader)
+	h := NewHandler(reader, []string{AllowAllOrigins})
 	h.now = func() time.Time { return frozenNow }
 	return h
 }
