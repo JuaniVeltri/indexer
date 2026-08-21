@@ -308,3 +308,67 @@ func TestWeeklyResolutionReturnsRealValues(t *testing.T) {
 		t.Errorf("first week active_accounts = %v, want %v", weekly[0].Value, fixtureExpectations.ActiveDay)
 	}
 }
+
+// TestBackfillAndIncrementalRefreshAgree is the consistency the issue asks for:
+// a range materialized in one pass, the way a backfill over history does it,
+// must match the same range materialized hour by hour as live ingestion
+// completes each bucket.
+//
+// The second pass recomputes with force, because a plain refresh skips buckets
+// that are already materialized and would compare a result against itself.
+func TestBackfillAndIncrementalRefreshAgree(t *testing.T) {
+	store := getTestDB(t)
+	defer store.Close()
+
+	from, to, cleanup := insertAnalyticsFixture(t, store)
+	defer cleanup()
+
+	ctx := context.Background()
+	hour0, hour1 := fixtureBase, fixtureBase.Add(time.Hour)
+
+	// Live-like: each hour materialized on its own as it completes.
+	for _, hour := range []time.Time{hour0, hour1} {
+		if _, err := store.RefreshAnalyticsAggregates(ctx, hour, hour.Add(time.Hour)); err != nil {
+			t.Fatalf("incremental refresh of %s: %v", hour, err)
+		}
+	}
+
+	incremental := make(map[analytics.Metric][]analytics.TimeSeriesPoint)
+	for _, metric := range analytics.AllMetrics {
+		points, err := store.TimeSeries(ctx, metric, analytics.ResolutionHourly, from, to)
+		if err != nil {
+			t.Fatalf("TimeSeries(%s) after incremental refresh: %v", metric, err)
+		}
+		incremental[metric] = points
+	}
+
+	// Backfill-like: the whole range recomputed in a single pass.
+	for _, aggregate := range analyticsAggregates {
+		_, err := store.db.ExecContext(ctx,
+			"CALL refresh_continuous_aggregate($1::regclass, $2::timestamptz, $3::timestamptz, force => true)",
+			aggregate.name, from, to)
+		if err != nil {
+			t.Fatalf("forced refresh of %s: %v", aggregate.name, err)
+		}
+	}
+
+	for _, metric := range analytics.AllMetrics {
+		backfilled, err := store.TimeSeries(ctx, metric, analytics.ResolutionHourly, from, to)
+		if err != nil {
+			t.Fatalf("TimeSeries(%s) after backfill: %v", metric, err)
+		}
+
+		want := incremental[metric]
+		if len(backfilled) != len(want) {
+			t.Errorf("%s: backfill produced %d buckets, incremental produced %d", metric, len(backfilled), len(want))
+			continue
+		}
+		for i := range want {
+			if !backfilled[i].Timestamp.Equal(want[i].Timestamp) || backfilled[i].Value != want[i].Value {
+				t.Errorf("%s bucket %d: backfill %v@%s, incremental %v@%s",
+					metric, i, backfilled[i].Value, backfilled[i].Timestamp,
+					want[i].Value, want[i].Timestamp)
+			}
+		}
+	}
+}
