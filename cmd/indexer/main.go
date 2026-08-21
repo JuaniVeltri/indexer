@@ -110,7 +110,7 @@ func runLive(cfg *config.Config) {
 			}
 		}()
 		defer func() {
-			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 			defer shutdownCancel()
 			if err := srv.Shutdown(shutdownCtx); err != nil {
 				log.Printf("metrics server shutdown error: %v", err)
@@ -140,8 +140,9 @@ func runLive(cfg *config.Config) {
 }
 
 // runServe starts the analytics read API without ingesting anything. This is
-// the process the explorer points NEXT_PUBLIC_INDEXER_URL at; the same routes
-// are also mounted on the live command's metrics server for local development.
+// the process the explorer points NEXT_PUBLIC_INDEXER_URL at, and the only one
+// that serves those routes — see the comment in runLive for why ingestion does
+// not.
 func runServe(cfg *config.Config) {
 	ctx, cancel := setupContext()
 	defer cancel()
@@ -267,7 +268,7 @@ func runAnalyticsBackfill(cfg *config.Config) {
 	// serving from aggregates that were never populated.
 	if err != nil {
 		log.Fatalf("Analytics backfill stopped after %d of %d aggregates: %v",
-			len(results), store.AnalyticsAggregateCount, err)
+			len(results), store.AnalyticsAggregateCount(), err)
 	}
 	log.Println("Analytics backfill complete.")
 }

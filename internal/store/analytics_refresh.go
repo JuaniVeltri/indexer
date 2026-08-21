@@ -29,9 +29,11 @@ var analyticsAggregates = []analyticsAggregate{
 	{"analytics_contract_activity_hourly", "1 hour"},
 }
 
-// AnalyticsAggregateCount is how many aggregates a full refresh covers, so
-// callers can report partial progress against the total.
-var AnalyticsAggregateCount = len(analyticsAggregates)
+// AnalyticsAggregateCount reports how many aggregates a full refresh covers, so
+// callers can describe partial progress against the total.
+func AnalyticsAggregateCount() int {
+	return len(analyticsAggregates)
+}
 
 // AnalyticsRefreshResult reports the outcome of refreshing one aggregate.
 type AnalyticsRefreshResult struct {

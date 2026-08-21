@@ -32,7 +32,7 @@ empty value to refuse cross-origin requests entirely.
 | ---------- | -------- | ------ |
 | `metric` | yes | `tx_count`, `tx_volume`, `fee_classic`, `fee_soroban`, `active_accounts`, `new_accounts`, `asset_supply` |
 | `resolution` | yes | `hourly`, `daily`, `weekly` |
-| `from` | yes | RFC 3339 timestamp, inclusive |
+| `from` | yes | RFC 3339 timestamp. Widened to the start of the bucket containing it |
 | `to` | yes | RFC 3339 timestamp, exclusive |
 
 ```bash
@@ -57,7 +57,7 @@ curl 'localhost:8080/api/v1/analytics/timeseries?metric=tx_count&resolution=hour
 | Parameter | Required | Values |
 | ---------- | -------- | ------ |
 | `metric` | yes | `contract_activity`, `asset_transfers`, `highest_fees` |
-| `window` | yes | `24h`, `7d`, `30d` |
+| `window` | yes | `24h`, `7d`, `30d`. Widened to the enclosing hour |
 | `limit` | no | 1–100, default 10 |
 
 ```bash

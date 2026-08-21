@@ -96,10 +96,13 @@ func sourceFor(metric analytics.Metric, resolution analytics.Resolution) (timeSe
 	return source, nil
 }
 
-// TimeSeries returns one point per bucket for metric between from (inclusive)
-// and to (exclusive), bucketed at the requested resolution. Buckets with no
-// activity are absent rather than zero, and a range with no data at all yields
-// an empty series rather than an error.
+// TimeSeries returns one point per bucket for metric across [from, to) at the
+// requested resolution. from is widened to the start of the bucket containing
+// it, so the first point can begin slightly earlier than asked for and every
+// returned bucket is complete rather than a sliced one reported as whole.
+//
+// Buckets with no activity are absent rather than zero, and a range with no
+// data at all yields an empty series rather than an error.
 func (s *PostgresStore) TimeSeries(
 	ctx context.Context,
 	metric analytics.Metric,
