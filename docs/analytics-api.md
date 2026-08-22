@@ -88,7 +88,7 @@ curl 'localhost:8080/api/v1/analytics/top?metric=contract_activity&window=24h&li
 | `tx_count` | `transactions` | `COUNT(*)` | transactions |
 | `tx_volume` | `token_events` (`transfer`, native asset) | `SUM(amount)`, scaled to whole units | XLM |
 | `fee_classic` | `transactions` where `NOT is_soroban` | `SUM(fee_charged)` | stroops |
-| `fee_soroban` | `transactions` where `is_soroban` | `SUM(fee_charged)` | stroops |
+| `fee_soroban` | `transactions` where `is_soroban` | `SUM(fee_charged)` — **total** fee, not the resource fee | stroops |
 | `active_accounts` | `transactions` | `COUNT(DISTINCT account)` | accounts |
 | `new_accounts` | `operations` where `type_name = 'create_account'` | `COUNT(*)` | accounts |
 | `asset_supply` | `token_events` (`mint`, `burn`, `clawback`) | net minted minus burned | asset units |
@@ -106,8 +106,10 @@ Notes on the definitions:
   volume by more than an order of magnitude, so only `transfer` events on the native asset count.
 - **`fee_soroban` is the total fee charged on Soroban transactions**, not the isolated resource-fee
   component. `transactions.soroban_resources` exists in the schema but the transform layer does not
-  populate it yet, so the resource fee cannot be separated from the inclusion fee. Splitting them
-  requires extracting `SorobanTransactionData.resourceFee` during transform — tracked separately.
+  populate it, so the resource fee cannot be separated from the inclusion fee. **Do not chart this
+  as a resource fee** — doing so overstates it by the inclusion fee on every Soroban transaction.
+  Extracting `SorobanTransactionData.resourceFee` is tracked in
+  [#43](https://github.com/StellarViewOrg/indexer/issues/43).
 - **`contract_activity` counts contract events, not invocations.** `operations.contract_id` is never
   populated: the transform layer records only the host function *type* for `invoke_host_function`,
   not the contract called. `contract_events` is the only per-contract signal available today.

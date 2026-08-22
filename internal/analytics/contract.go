@@ -29,11 +29,18 @@ const (
 	MetricTxVolume Metric = "tx_volume"
 	// MetricFeeClassic totals fees charged on non-Soroban transactions, in stroops.
 	MetricFeeClassic Metric = "fee_classic"
-	// MetricFeeSoroban totals fees charged on Soroban transactions, in stroops.
+	// MetricFeeSoroban totals the fee charged on Soroban transactions, in
+	// stroops. This is the whole fee, not the Soroban resource fee: the
+	// indexer does not record the resource component, so it cannot be
+	// separated from the inclusion fee. Charting this as a resource fee
+	// overstates it by the inclusion fee on every transaction.
 	MetricFeeSoroban Metric = "fee_soroban"
 	// MetricActiveAccounts counts distinct transaction source accounts per bucket.
 	MetricActiveAccounts Metric = "active_accounts"
-	// MetricNewAccounts counts create_account operations per bucket.
+	// MetricNewAccounts counts create_account operations per bucket, including
+	// those in transactions that failed — the operations are recorded either
+	// way and an aggregate cannot join them to the transaction's status. Do
+	// not present it as accounts successfully created.
 	MetricNewAccounts Metric = "new_accounts"
 	// MetricAssetSupply totals net supply change (mints minus burns and clawbacks).
 	MetricAssetSupply Metric = "asset_supply"

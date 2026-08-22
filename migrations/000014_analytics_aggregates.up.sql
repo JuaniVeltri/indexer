@@ -20,10 +20,13 @@
 -- database that already holds history; `indexer analytics-backfill` populates
 -- them afterwards.
 
--- Transaction counts and fee totals. Soroban and classic fees are split by
--- is_soroban rather than by resource fee: transactions.soroban_resources is
--- never populated by the transform layer, so the resource-fee component cannot
--- be isolated yet.
+-- Transaction counts and fee totals.
+--
+-- fee_soroban is the TOTAL fee charged on Soroban transactions, not the Soroban
+-- resource fee. The split is by is_soroban because transactions.soroban_resources
+-- is never populated by the transform layer, so the resource component cannot be
+-- isolated — reading this column as a resource fee overstates it by the inclusion
+-- fee on every Soroban transaction. Resource fees are tracked separately in #43.
 CREATE MATERIALIZED VIEW analytics_tx_hourly
 WITH (timescaledb.continuous, timescaledb.materialized_only = false) AS
 SELECT
