@@ -314,22 +314,44 @@ func TestWeeklyResolutionReturnsRealValues(t *testing.T) {
 // must match the same range materialized hour by hour as live ingestion
 // completes each bucket.
 //
-// The second pass recomputes with force, because a plain refresh skips buckets
-// that are already materialized and would compare a result against itself.
+// It starts from unmaterialized aggregates deliberately. Refreshing a window
+// that is already materialized is a no-op — Timescale skips buckets it has
+// already computed — so driving the "incremental" pass over a materialized
+// window would compare a result against itself and pass no matter what the
+// aggregates contained.
 func TestBackfillAndIncrementalRefreshAgree(t *testing.T) {
 	store := getTestDB(t)
 	defer store.Close()
 
-	from, to, cleanup := insertAnalyticsFixture(t, store)
+	from, to, cleanup := insertAnalyticsFixtureRows(t, store)
 	defer cleanup()
 
 	ctx := context.Background()
 	hour0, hour1 := fixtureBase, fixtureBase.Add(time.Hour)
 
+	// Guard the premise: nothing may be materialized yet, or the incremental
+	// pass below would be skipped and this test would prove nothing.
+	for _, metric := range analytics.AllMetrics {
+		points, err := store.TimeSeries(ctx, metric, analytics.ResolutionHourly, from, to)
+		if err != nil {
+			t.Fatalf("TimeSeries(%s) before any refresh: %v", metric, err)
+		}
+		if len(points) != 0 {
+			t.Fatalf("%s reports %d buckets before any refresh — the aggregates are not empty, "+
+				"so the incremental pass would be a no-op", metric, len(points))
+		}
+	}
+
 	// Live-like: each hour materialized on its own as it completes.
 	for _, hour := range []time.Time{hour0, hour1} {
-		if _, err := store.RefreshAnalyticsAggregates(ctx, hour, hour.Add(time.Hour)); err != nil {
+		results, err := store.RefreshAnalyticsAggregates(ctx, hour, hour.Add(time.Hour))
+		if err != nil {
 			t.Fatalf("incremental refresh of %s: %v", hour, err)
+		}
+		for _, r := range results {
+			if r.Skipped && r.Aggregate == "analytics_tx_hourly" {
+				t.Fatalf("the hourly aggregate was skipped refreshing %s, so nothing was materialized", hour)
+			}
 		}
 	}
 
@@ -339,10 +361,14 @@ func TestBackfillAndIncrementalRefreshAgree(t *testing.T) {
 		if err != nil {
 			t.Fatalf("TimeSeries(%s) after incremental refresh: %v", metric, err)
 		}
+		if len(points) == 0 {
+			t.Fatalf("%s is still empty after the incremental refresh", metric)
+		}
 		incremental[metric] = points
 	}
 
-	// Backfill-like: the whole range recomputed in a single pass.
+	// Backfill-like: the whole range recomputed in a single pass. force is
+	// required because the buckets are materialized by now.
 	for _, aggregate := range analyticsAggregates {
 		_, err := store.db.ExecContext(ctx,
 			"CALL refresh_continuous_aggregate($1::regclass, $2::timestamptz, $3::timestamptz, force => true)",

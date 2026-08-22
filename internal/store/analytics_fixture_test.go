@@ -110,6 +110,21 @@ var fixtureExpectations = struct {
 func insertAnalyticsFixture(t *testing.T, s *PostgresStore) (from, to time.Time, cleanup func()) {
 	t.Helper()
 
+	from, to, cleanup = insertAnalyticsFixtureRows(t, s)
+
+	if _, err := s.RefreshAnalyticsAggregates(context.Background(), from, to); err != nil {
+		cleanup()
+		t.Fatalf("refresh aggregates: %v", err)
+	}
+	return from, to, cleanup
+}
+
+// insertAnalyticsFixtureRows writes the same rows but leaves the aggregates
+// unmaterialized, so a test can drive the refresh itself. Cleanup still deletes
+// and re-refreshes, which is what leaves the window empty for the next run.
+func insertAnalyticsFixtureRows(t *testing.T, s *PostgresStore) (from, to time.Time, cleanup func()) {
+	t.Helper()
+
 	ctx := context.Background()
 	hour0 := fixtureBase
 	hour1 := fixtureBase.Add(time.Hour)
@@ -130,11 +145,6 @@ func insertAnalyticsFixture(t *testing.T, s *PostgresStore) (from, to time.Time,
 	insertFixtureOperations(t, s, hour0, hour1)
 	insertFixtureTokenEvents(t, s, hour0, hour1)
 	insertFixtureContractEvents(t, s, hour0, hour1)
-
-	if _, err := s.RefreshAnalyticsAggregates(ctx, from, to); err != nil {
-		cleanup()
-		t.Fatalf("refresh aggregates: %v", err)
-	}
 
 	return from, to, cleanup
 }
