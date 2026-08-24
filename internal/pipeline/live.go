@@ -26,6 +26,7 @@ type LivePipeline struct {
 	publisher         Publisher
 	networkPassphrase string
 	batchSize         int
+	registryIDs       []string
 }
 
 func NewLivePipeline(rpc *source.RPCClient, store *store.PostgresStore, networkPassphrase string, batchSize int) *LivePipeline {
@@ -39,6 +40,10 @@ func NewLivePipeline(rpc *source.RPCClient, store *store.PostgresStore, networkP
 
 func (p *LivePipeline) SetPublisher(pub Publisher) {
 	p.publisher = pub
+}
+
+func (p *LivePipeline) SetRegistryContractIDs(ids []string) {
+	p.registryIDs = ids
 }
 
 // Run starts the live ingestion loop. It blocks until the context is cancelled.
@@ -210,13 +215,14 @@ func (p *LivePipeline) processLedgerBatch(ctx context.Context, startLedger uint3
 }
 
 func (p *LivePipeline) processOneLedger(ctx context.Context, ledgerEntry source.LedgerEntry, txEntries []source.TransactionEntry) error {
-	return ProcessOneLedger(ctx, p.rpc, p.store, p.publisher, p.networkPassphrase, ledgerEntry, txEntries)
+	return ProcessOneLedger(ctx, p.rpc, p.store, p.publisher, p.networkPassphrase, ledgerEntry, txEntries, p.registryIDs)
 }
 
 // ProcessOneLedger transforms and stores a single ledger with its transactions and operations.
 // It is exported so that different pipeline implementations (live, backfill, S3) can reuse it.
 // rpc may be nil — when provided, new contracts discovered in the ledger are processed asynchronously.
-func ProcessOneLedger(ctx context.Context, rpc *source.RPCClient, db *store.PostgresStore, pub Publisher, networkPassphrase string, ledgerEntry source.LedgerEntry, txEntries []source.TransactionEntry) error {
+// registryIDs are Soroban Domains registry contract IDs to index; empty disables domain ingestion.
+func ProcessOneLedger(ctx context.Context, rpc *source.RPCClient, db *store.PostgresStore, pub Publisher, networkPassphrase string, ledgerEntry source.LedgerEntry, txEntries []source.TransactionEntry, registryIDs []string) error {
 	// Transform ledger
 	ledger, err := transform.LedgerFromRPC(ledgerEntry)
 	if err != nil {
@@ -313,6 +319,12 @@ func ProcessOneLedger(ctx context.Context, rpc *source.RPCClient, db *store.Post
 	if err := db.InsertContractEventBatch(ctx, contractEvents); err != nil {
 		metrics.DBErrors.Inc()
 		return fmt.Errorf("insert contract events: %w", err)
+	}
+
+	domainEvents := transform.DomainEventsFromContractEvents(contractEvents, registryIDs)
+	if err := db.ApplyDomainEvents(ctx, domainEvents); err != nil {
+		metrics.DBErrors.Inc()
+		return fmt.Errorf("apply domain events: %w", err)
 	}
 
 	// Update cursor

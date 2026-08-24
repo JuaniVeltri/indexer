@@ -18,6 +18,7 @@ type BackfillPipeline struct {
 	networkPassphrase string
 	batchSize         int
 	workerCount       int
+	registryIDs       []string
 }
 
 func NewBackfillPipeline(rpc *source.RPCClient, store *store.PostgresStore, networkPassphrase string, batchSize, workerCount int) *BackfillPipeline {
@@ -28,6 +29,10 @@ func NewBackfillPipeline(rpc *source.RPCClient, store *store.PostgresStore, netw
 		batchSize:         batchSize,
 		workerCount:       workerCount,
 	}
+}
+
+func (p *BackfillPipeline) SetRegistryContractIDs(ids []string) {
+	p.registryIDs = ids
 }
 
 // Run processes ledgers from startLedger to endLedger (inclusive) using parallel workers.
@@ -152,7 +157,7 @@ func (p *BackfillPipeline) processLedgerBatch(ctx context.Context, startLedger u
 			return processed, fmt.Errorf("extract txs ledger %d: %w", rpcLedger.Sequence, err)
 		}
 
-		if err := ProcessOneLedger(ctx, p.rpc, p.store, nil, p.networkPassphrase, rpcLedger, txEntries); err != nil {
+		if err := ProcessOneLedger(ctx, p.rpc, p.store, nil, p.networkPassphrase, rpcLedger, txEntries, p.registryIDs); err != nil {
 			return processed, fmt.Errorf("process ledger %d: %w", rpcLedger.Sequence, err)
 		}
 		processed++

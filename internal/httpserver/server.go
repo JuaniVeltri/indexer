@@ -54,13 +54,15 @@ type dbPinger interface {
 // simulate a stuck pipeline without depending on real elapsed time.
 type staleChecker func(maxAge time.Duration) bool
 
-// Server serves /metrics and /healthz for a running indexer process.
+// Server serves /metrics, /healthz, and the domains read API.
 type Server struct {
-	srv *http.Server
+	srv     *http.Server
+	domains DomainReader
 }
 
-// Options configures what a Server exposes. /healthz is always mounted, since
-// every process wants a probe.
+// Options configures what a Server exposes. /healthz and the domains read API
+// are always mounted, since every process wants a probe and domain lookups
+// degrade gracefully (indexed=false) when no reader is attached.
 type Options struct {
 	// DB backs /healthz, verifying the database is reachable and that the live
 	// pipeline is still advancing.
@@ -79,6 +81,7 @@ type Options struct {
 
 // New builds a Server listening on addr with the given options.
 func New(addr string, opts Options) *Server {
+	s := &Server{}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", healthzHandler(opts.DB, health.Stale))
 
@@ -88,16 +91,24 @@ func New(addr string, opts Options) *Server {
 	if opts.Analytics != nil {
 		analytics.NewHandler(opts.Analytics, opts.AllowedOrigins).Register(mux)
 	}
+	mux.HandleFunc("GET /v1/domains/{name}/events", s.handleDomainEvents)
+	mux.HandleFunc("GET /v1/domains/{name}", s.handleDomainByName)
+	mux.HandleFunc("GET /v1/domains", s.handleDomains)
 
-	return &Server{
-		srv: &http.Server{
-			Addr:              addr,
-			Handler:           mux,
-			ReadHeaderTimeout: readHeaderTimeout,
-			WriteTimeout:      writeTimeout,
-			IdleTimeout:       idleTimeout,
-		},
+	s.srv = &http.Server{
+		Addr:              addr,
+		Handler:           mux,
+		ReadHeaderTimeout: readHeaderTimeout,
+		WriteTimeout:      writeTimeout,
+		IdleTimeout:       idleTimeout,
 	}
+	return s
+}
+
+// SetDomainReader attaches the domains store used by the read API. When unset,
+// domain endpoints return HTTP 200 with indexed=false.
+func (s *Server) SetDomainReader(r DomainReader) {
+	s.domains = r
 }
 
 // Start blocks serving requests until the server is shut down. It returns

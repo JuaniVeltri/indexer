@@ -145,3 +145,66 @@ type ContractEvent struct {
 	ValueDecoded    *string   `db:"value_decoded"`  // JSON
 	CreatedAt       time.Time `db:"created_at"`
 }
+
+const (
+	DomainStatusActive  = "active"
+	DomainStatusExpired = "expired"
+	DomainStatusRevoked = "revoked"
+
+	DomainEventRegister = "register"
+	DomainEventTransfer = "transfer"
+	DomainEventRenew    = "renew"
+	DomainEventRevoke   = "revoke"
+	DomainEventClaim    = "claim"
+
+	DomainTargetAccount  = "account"
+	DomainTargetContract = "contract"
+)
+
+// Domain is the current state of a Soroban Domains registration.
+type Domain struct {
+	Node            string    `db:"node"`
+	Name            string    `db:"name"`
+	TLD             string    `db:"tld"`
+	Label           string    `db:"label"`
+	Owner           string    `db:"owner"`
+	ResolvedAddress string    `db:"resolved_address"`
+	TargetType      string    `db:"target_type"`
+	RegisteredAt    time.Time `db:"registered_at"`
+	ExpiresAt       time.Time `db:"expires_at"`
+	Status          string    `db:"status"`
+	LastEventLedger uint32    `db:"last_event_ledger"`
+	LastEventTx     string    `db:"last_event_tx"`
+	CreatedAt       time.Time `db:"created_at"`
+	UpdatedAt       time.Time `db:"updated_at"`
+}
+
+// EffectiveStatus returns the query-facing status: revoked stays revoked,
+// otherwise expiry is evaluated at now so stale "active" rows read as expired.
+func (d Domain) EffectiveStatus(now time.Time) string {
+	if d.Status == DomainStatusRevoked {
+		return DomainStatusRevoked
+	}
+	if !d.ExpiresAt.IsZero() && !d.ExpiresAt.After(now) {
+		return DomainStatusExpired
+	}
+	return DomainStatusActive
+}
+
+// DomainEvent is a decoded registry contract event used to update Domain state
+// and persisted as per-domain history.
+type DomainEvent struct {
+	Node            string
+	Name            string
+	TLD             string
+	Label           string
+	EventType       string
+	Owner           string
+	ResolvedAddress string
+	ExpiresAt       *time.Time
+	RegisteredAt    *time.Time
+	TransactionHash string
+	LedgerSequence  uint32
+	CreatedAt       time.Time
+	Details         string // JSON
+}

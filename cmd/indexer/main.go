@@ -100,31 +100,33 @@ func runLive(cfg *config.Config) {
 	db, rpc := initDeps(cfg, passphrase)
 	defer db.Close()
 
-	if cfg.MetricsAddr != "" {
+	if cfg.ListenAddr() != "" {
 		// The analytics API is deliberately not mounted here. It would share the
 		// pipeline's connection pool, so a burst of dashboard queries could
 		// exhaust it, stall ingestion writes, and trip the /healthz staleness
 		// check into a restart. Run it as its own process with `serve`.
-		srv := httpserver.New(cfg.MetricsAddr, httpserver.Options{
+		srv := httpserver.New(cfg.ListenAddr(), httpserver.Options{
 			DB:            db.DB(),
 			ExposeMetrics: true,
 		})
+		srv.SetDomainReader(db)
 		go func() {
-			log.Printf("metrics server listening on %s (/metrics, /healthz)", cfg.MetricsAddr)
+			log.Printf("http server listening on %s (/metrics, /healthz, /v1/domains)", cfg.ListenAddr())
 			if err := srv.Start(); err != nil {
-				log.Printf("metrics server error: %v", err)
+				log.Printf("http server error: %v", err)
 			}
 		}()
 		defer func() {
 			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 			defer shutdownCancel()
 			if err := srv.Shutdown(shutdownCtx); err != nil {
-				log.Printf("metrics server shutdown error: %v", err)
+				log.Printf("http server shutdown error: %v", err)
 			}
 		}()
 	}
 
 	p := pipeline.NewLivePipeline(rpc, db, passphrase, cfg.BatchSize)
+	p.SetRegistryContractIDs(cfg.RegistryContractIDs())
 
 	// Attach Redis publisher if configured
 	if cfg.RedisURL != "" {
@@ -204,6 +206,7 @@ func runBackfill(cfg *config.Config) {
 	defer db.Close()
 
 	p := pipeline.NewBackfillPipeline(rpc, db, passphrase, cfg.BatchSize, cfg.WorkerCount)
+	p.SetRegistryContractIDs(cfg.RegistryContractIDs())
 
 	log.Printf("Starting backfill from ledger %d to %d...", startLedger, endLedger)
 	if err := p.Run(ctx, startLedger, endLedger); err != nil && err != context.Canceled {
@@ -225,6 +228,7 @@ func runS3Backfill(cfg *config.Config) {
 	defer db.Close()
 
 	p := pipeline.NewS3BackfillPipeline(db, cfg.WorkerCount)
+	p.SetRegistryContractIDs(cfg.RegistryContractIDs())
 
 	log.Printf("Starting S3 data lake backfill from ledger %d to %d...", startLedger, endLedger)
 	if err := p.Run(ctx, startLedger, endLedger); err != nil && err != context.Canceled {

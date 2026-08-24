@@ -20,6 +20,7 @@ import (
 type S3BackfillPipeline struct {
 	store       *store.PostgresStore
 	workerCount int
+	registryIDs []string
 }
 
 func NewS3BackfillPipeline(store *store.PostgresStore, workerCount int) *S3BackfillPipeline {
@@ -27,6 +28,10 @@ func NewS3BackfillPipeline(store *store.PostgresStore, workerCount int) *S3Backf
 		store:       store,
 		workerCount: workerCount,
 	}
+}
+
+func (p *S3BackfillPipeline) SetRegistryContractIDs(ids []string) {
+	p.registryIDs = ids
 }
 
 // Run processes ledgers from startLedger to endLedger (inclusive) by downloading
@@ -127,7 +132,7 @@ func (p *S3BackfillPipeline) runWorker(ctx context.Context, id int, start, end u
 			return fmt.Errorf("convert transactions for ledger %d: %w", seq, err)
 		}
 
-		if err := ProcessOneLedger(ctx, nil, p.store, nil, network.PublicNetworkPassphrase, ledgerEntry, txEntries); err != nil {
+		if err := ProcessOneLedger(ctx, nil, p.store, nil, network.PublicNetworkPassphrase, ledgerEntry, txEntries, p.registryIDs); err != nil {
 			return fmt.Errorf("process ledger %d: %w", seq, err)
 		}
 
